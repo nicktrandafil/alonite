@@ -76,12 +76,13 @@ public:
 
     TaskStack(TaskStack const&) = delete;
 
-    /// \invariant One thread at a time can operate on a task stack, meaning, that pushing
-    /// shouldn't involve concurrency
+    /// \invariant Inv1 - one thread at a time can operate on a task stack, meaning, that
+    /// pushing. shouldn't involve concurrency
     void push(ErasedFrame frame) noexcept(false) {
         frames.push(frame);
     }
 
+    /// \invariant Inv1
     ErasedFrame pop() noexcept {
         ErasedFrame ret = frames.top();
         frames.pop();
@@ -101,6 +102,7 @@ public:
 
     constexpr static size_t soo_len = 24;
 
+    /// \invariant Inv1
     template <class T>
     T take_result() noexcept(false) {
         alonite_assert(result_index != Result::none, Invariant{});
@@ -137,6 +139,7 @@ public:
         return static_cast<T>(alonite_unreachable(Invariant{}));
     }
 
+    /// \invariant Inv1
     template <class T>
     void put_result(T&& val) noexcept(noexcept(std::forward<T>(val))) {
         using U = std::decay_t<T>;
@@ -159,17 +162,20 @@ public:
         result_index = Result::value;
     }
 
+    /// \invariant Inv1
     void put_result() noexcept {
         alonite_assert(result_index == Result::none, Invariant{});
         result_index = Result::value;
     }
 
+    /// \invariant Inv1
     void put_result(std::exception_ptr ptr) noexcept {
         alonite_assert(result_index == Result::none, Invariant{});
         result_exception = ptr;
         result_index = Result::exception;
     }
 
+    // todo: needs synchronization
     size_t size() const noexcept {
         return frames.size();
     }
@@ -498,7 +504,7 @@ struct JoinHandle {
                                  ReturnValue<promise_type>> {
         using ValueType = T;
 
-        std::optional<std::weak_ptr<TaskStack>> continuation;
+        std::optional<std::weak_ptr<TaskStack>> continuation; // todo: concurrency
 
 #if defined(__clang__)
         promise_type(Task<T> const&, std::weak_ptr<TaskStack> x)
@@ -569,6 +575,7 @@ struct JoinHandle {
         }
     };
 
+    // todo: concurrency
     bool await_ready() const noexcept {
         auto const stack = this->stack.lock();
         return !stack || stack->size() == 0;
@@ -576,13 +583,12 @@ struct JoinHandle {
 
     template <class U>
     bool await_suspend(std::coroutine_handle<U> caller) const noexcept(false) {
-        auto const our_stack = this->stack.lock();
-        alonite_assert(our_stack, Invariant{});
-        alonite_assert(co, Invariant{});
-        if (await_ready()) {
+        alonite_assert(stack_guard, Invariant{}, "Self::abort() shouldn't be called");
+        if (await_ready()) { // todo: need to lock both `TaskStack::size` and `co`
             return false;
         } else {
-            co.promise().continuation = caller.promise().stack;
+            alonite_assert(co, Invariant{});
+            co.promise().continuation = caller.promise().stack; // todo: concurrency
             return true;
         }
     }
@@ -627,7 +633,7 @@ struct JoinHandle {
     }
 
     bool abort() {
-        if (!await_ready()) {
+        if (!await_ready()) { // todo: synchronize
             stack_guard.reset();
             return true;
         } else {
@@ -1424,6 +1430,10 @@ public:
                 std::move(tasks));
 
         auto const id = current_executor->next_id();
+
+        // Populate index, group id and continuation
+        // Array for us - because its static. Vec for guarding, because it is dynamic. The
+        // contain copies of the same thing.
         auto arr_vec = std::apply(
                 [this, id](auto&... stack_wrapper) {
                     unsigned i = 0;
@@ -1436,10 +1446,11 @@ public:
                 },
                 task_wrappers);
 
-        this->stacks = std::move(arr_vec.first);
-        alonite_assert(stacks[0].lock(), Invariant{});
-        current_executor->add_guard_group(id, std::move(arr_vec.second));
+        // save
+        this->stacks = std::move(arr_vec).first;
+        current_executor->add_guard_group(id, std::move(arr_vec).second);
 
+        // start
         return std::apply(
                 [](auto const& first, auto&&... other) {
                     [](...) {
