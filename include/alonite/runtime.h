@@ -38,7 +38,7 @@ class TaskStack;
 
 struct Executor {
     static unsigned next_id() noexcept {
-        static unsigned id = 0; // todo: atomic
+        static std::atomic<unsigned> id = 0;
         return ++id;
     }
 
@@ -77,7 +77,7 @@ public:
     TaskStack(TaskStack const&) = delete;
 
     /// \invariant Inv1 - one thread at a time can operate on a task stack, meaning, that
-    /// pushing. shouldn't involve concurrency
+    /// pushing shouldn't involve concurrency
     void push(ErasedFrame frame) noexcept(false) {
         frames.push(frame);
     }
@@ -175,7 +175,6 @@ public:
         result_index = Result::exception;
     }
 
-    // todo: needs synchronization
     size_t size() const noexcept {
         return frames.size();
     }
@@ -191,12 +190,22 @@ public:
         }
     }
 
-    unsigned tasks_to_complete = 0;
-    unsigned tasks_completed = 0;
+    unsigned /*const*/ tasks_to_complete = 0;
+    std::atomic<unsigned> tasks_completed = 0;
 
-    unsigned completed_task_index = 0;
+    unsigned /*const*/ completed_task_index = 0;
 
+    // No harm if it lives a bit longer, because the continuation will
+    // take the value of the Stack, so basically the stack will be just a storage without
+    // any user-interested destructor to run, and the storage will be released sooner or
+    // later, when the continuation completes.
     std::shared_ptr<TaskStack> guard;
+
+    // If a task is a spawned task, awaiting it should be guarded, because it is already
+    // runnning. Also pushing and popping to/from the stack by runner should also be
+    // guarded.
+    bool complete = false;
+    std::mutex mutex;
 
 private:
     enum class Result {
@@ -211,7 +220,7 @@ private:
     } result_value;
     void (*destroy_value)(ResultType&) = nullptr;
     std::stack<ErasedFrame, std::vector<ErasedFrame>>
-            frames; // todo: allocator optimization
+            frames; // todo: allocator optimization, intrusive list
 };
 
 inline thread_local Executor* current_executor = nullptr;
@@ -296,12 +305,12 @@ struct ReturnVoid {
     }
 };
 
-template <class PromiseT, class CoroT>
+template <class PromiseT, class Stack /*Coroutine Concept*/>
 struct CreateStack {
-    CoroT get_return_object() noexcept(false) {
+    Stack get_return_object() noexcept(false) {
         auto const self = static_cast<PromiseT*>(this);
         auto const co = std::coroutine_handle<PromiseT>::from_promise(*self);
-        CoroT ret{std::make_shared<TaskStack>(
+        Stack ret{std::make_shared<TaskStack>(
                           TaskStack::ErasedFrame{.co = co, .ex = current_executor}),
                   co};
         self->stack = ret.stack;
@@ -312,8 +321,7 @@ struct CreateStack {
 template <class T>
 class Task {
 public:
-    Task() = delete; // todo:? maybe allow default construction, this would allow using
-                     // tasks in initializer lists
+    Task() = delete;
 
     Task(Task const&) = delete;
     Task& operator=(Task const&) = delete;
@@ -339,7 +347,7 @@ public:
             return Task(std::coroutine_handle<promise_type>::from_promise(*this));
         }
 
-        std::suspend_always initial_suspend() noexcept {
+        std::suspend_always initial_suspend() const noexcept {
             return {};
         }
 
@@ -399,14 +407,11 @@ public:
     ConditionalVariable& operator=(ConditionalVariable&&) = delete;
 
     /// \note Can be called from synchronous code
+    /// \note thread-safe
     void notify() noexcept {
-        if (auto c = this->continuation.lock()) {
-            if (c->erased_top().ex == current_executor) {
+        if (auto c = this->continuation.exchange({}).lock()) {
+            if (!schedule_on_other_ex(std::move(c))) {
                 c->erased_top().co.resume();
-            } else {
-                c->erased_top().ex->spawn([c]() mutable {
-                    c->erased_top().co.resume();
-                });
             }
         }
     }
@@ -427,7 +432,7 @@ private:
         template <class U>
         void await_suspend(std::coroutine_handle<U> continuation) noexcept {
             current_executor->increment_work();
-            cv->continuation = continuation.promise().stack;
+            cv->continuation.store(continuation.promise().stack);
         }
 
         ~Awaiter() noexcept {
@@ -437,7 +442,7 @@ private:
         ConditionalVariable* cv;
     };
 
-    std::weak_ptr<TaskStack> continuation;
+    std::atomic<std::weak_ptr<TaskStack>> continuation;
 };
 
 struct Error : std::exception {};
@@ -499,36 +504,20 @@ template <class T>
 struct JoinHandle {
     struct promise_type
             : BasePromise
+            , CreateStack<promise_type, JoinHandle>
             , std::conditional_t<std::is_void_v<T>,
                                  ReturnVoid<promise_type>,
                                  ReturnValue<promise_type>> {
         using ValueType = T;
 
-        std::optional<std::weak_ptr<TaskStack>> continuation; // todo: concurrency
+        std::optional<std::weak_ptr<TaskStack>> continuation;
 
-#if defined(__clang__)
-        promise_type(Task<T> const&, std::weak_ptr<TaskStack> x)
-                : BasePromise{std::move(x)} {
-        }
-#else
-        template <class U>
-        promise_type(U const&, Task<T> const&, std::weak_ptr<TaskStack> x)
-                : BasePromise{std::move(x)} {
-        }
-#endif
+        promise_type() = default;
 
         promise_type(promise_type const&) = delete;
         promise_type& operator=(promise_type const&) = delete;
         promise_type(promise_type&&) = delete;
         promise_type& operator=(promise_type&&) = delete;
-
-        JoinHandle get_return_object() noexcept(false) {
-            auto const stack = this->stack.lock();
-            alonite_assert(stack, Invariant{});
-            auto const co = std::coroutine_handle<promise_type>::from_promise(*this);
-            stack->push(TaskStack::ErasedFrame{.co = co, .ex = current_executor});
-            return JoinHandle{co, stack};
-        }
 
         std::suspend_never initial_suspend() const noexcept {
             return {};
@@ -544,13 +533,12 @@ struct JoinHandle {
                            schedule_on_other_ex(std::move(*continuation));
                 }
 
-                // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<promise_type> co) noexcept {
                     ALONITE_SCOPE_EXIT {
                         co.destroy();
                     };
-                    // todo:? maybe release
+                    alonite_assert(continuation && *continuation, Invariant{});
                     return (*continuation)->erased_top().co;
                 }
 
@@ -560,7 +548,13 @@ struct JoinHandle {
 
             auto const stack = this->stack.lock();
             alonite_assert(stack, Invariant{});
-            stack->pop();
+
+            {
+                std::scoped_lock lock{stack->mutex};
+                stack->complete = true;
+                stack->pop();
+            }
+
             feature(current_executor->remove_guard(stack.get()),
                     "Have both abort signal and ready result set in JoinHandle in case "
                     "of a race condition");
@@ -575,20 +569,24 @@ struct JoinHandle {
         }
     };
 
-    // todo: concurrency
     bool await_ready() const noexcept {
-        auto const stack = this->stack.lock();
-        return !stack || stack->size() == 0;
+        return false;
     }
 
     template <class U>
     bool await_suspend(std::coroutine_handle<U> caller) const noexcept(false) {
-        alonite_assert(stack_guard, Invariant{}, "Self::abort() shouldn't be called");
-        if (await_ready()) { // todo: need to lock both `TaskStack::size` and `co`
+        auto const stack = this->stack.lock();
+        if (!stack) {
+            return false;
+        }
+
+        std::scoped_lock lock{stack->mutex};
+
+        if (stack->complete) {
             return false;
         } else {
             alonite_assert(co, Invariant{});
-            co.promise().continuation = caller.promise().stack; // todo: concurrency
+            co.promise().continuation = caller.promise().stack;
             return true;
         }
     }
@@ -612,11 +610,11 @@ struct JoinHandle {
         return stack->template take_result<T>();
     }
 
-    JoinHandle(std::coroutine_handle<promise_type> co,
-               std::shared_ptr<TaskStack> stack) noexcept
-            : co{co}
-            , stack{stack}
-            , stack_guard{std::move(stack)} {
+    JoinHandle(std::shared_ptr<TaskStack> stack,
+               std::coroutine_handle<promise_type> co) noexcept
+            : stack{stack}
+            , stack_guard{std::move(stack)}
+            , co{co} {
         executor = current_executor;
     }
 
@@ -632,19 +630,26 @@ struct JoinHandle {
         }
     }
 
+    /// \note Can be called from synchronous code
+    /// \note thread-safe
     bool abort() {
-        if (!await_ready()) { // todo: synchronize
-            stack_guard.reset();
-            return true;
-        } else {
+        if (!stack_guard) {
             return false;
         }
+
+        std::scoped_lock lock{stack_guard->mutex};
+        if (stack_guard->complete) {
+            return false;
+        }
+
+        stack_guard.reset();
+        return true;
     }
 
     Executor* executor; // todo: get from the stack
-    std::coroutine_handle<promise_type> co;
     std::weak_ptr<TaskStack> stack;
     std::shared_ptr<TaskStack> stack_guard;
+    std::coroutine_handle<promise_type> co; // todo:  get from the stack
 };
 
 struct TaskStackPtrHash {
@@ -701,12 +706,14 @@ public:
 
             struct promise_type
                     : BasePromise
+                    , CreateStack<promise_type, Stack>
                     , std::conditional_t<std::is_void_v<T>,
                                          ReturnVoid<promise_type>,
                                          ReturnValue<promise_type>> {
                 using ValueType [[maybe_unused]] = T;
 
                 Stack get_return_object() noexcept(false) {
+                    // todo: use CreateStack; it will need removing `co` from Stack
                     Stack ret{std::make_shared<TaskStack>(TaskStack::ErasedFrame{
                             .co = std::coroutine_handle<promise_type>::from_promise(
                                     *this),
@@ -850,6 +857,7 @@ public:
                 using ValueType [[maybe_unused]] = T;
 
                 Stack get_return_object() noexcept(false) {
+                    // todo: use CreateStack; it will need removing `co` from Stack
                     Stack ret{std::make_shared<TaskStack>(TaskStack::ErasedFrame{
                             .co = std::coroutine_handle<promise_type>::from_promise(
                                     *this),
@@ -978,6 +986,7 @@ public:
         --work;
     }
 
+private:
     std::mutex tasks_mutex;
     std::vector<Work> tasks;
 
@@ -1067,13 +1076,11 @@ public:
                                     || schedule_on_other_ex(std::move(*continuation));
                         }
 
-                        // todo: reuse
                         std::coroutine_handle<> await_suspend(
                                 std::coroutine_handle<promise_type> co) noexcept {
                             ALONITE_SCOPE_EXIT {
                                 co.destroy();
                             };
-                            // todo:? maybe release
                             return (*continuation)->erased_top().co;
                         }
 
@@ -1108,10 +1115,9 @@ public:
         current_executor->add_guard(std::shared_ptr{task_wrapper.stack});
         current_executor->spawn(
                 [stack = std::weak_ptr{std::move(task_wrapper.stack)},
-                 continuation = caller.promise().stack,
-                 executor = current_executor]() mutable {
+                 continuation = caller.promise().stack]() mutable {
                     if (auto const x = stack.lock();
-                        x && executor->remove_guard(x.get())) {
+                        x && current_executor->remove_guard(x.get())) {
                         cancel_and_continue(std::move(stack), std::move(continuation));
                     }
                 },
@@ -1179,7 +1185,6 @@ struct WhenAllStack {
                     return schedule_on_other_ex(std::move(*continuation));
                 }
 
-                // todo: reuse
                 std::coroutine_handle<> await_suspend(
                         std::coroutine_handle<> co) noexcept {
                     ALONITE_SCOPE_EXIT {
@@ -1557,10 +1562,9 @@ private:
 
 template <class T>
 inline JoinHandle<T> spawn(Task<T>&& task) noexcept(false) {
-    auto stack = std::make_shared<TaskStack>();
-    auto t = [&](Task<T> task, std::weak_ptr<TaskStack>) -> JoinHandle<T> {
+    auto t = [](Task<T> task) -> JoinHandle<T> {
         co_return co_await task;
-    }(std::move(task), stack);
+    }(std::move(task));
     return t;
 }
 
