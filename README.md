@@ -1,1 +1,1 @@
-Implements Remote Procedure Call on top of a Coroutine Runtime
+Implements a runtime on coroutines
