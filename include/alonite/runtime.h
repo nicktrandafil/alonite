@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <stack>
 #include <thread>
 #include <type_traits>
@@ -646,7 +647,7 @@ struct JoinHandle {
         return true;
     }
 
-    Executor* executor; // todo: get from the stack
+    Executor* executor;
     std::weak_ptr<TaskStack> stack;
     std::shared_ptr<TaskStack> stack_guard;
     std::coroutine_handle<promise_type> co; // todo:  get from the stack
@@ -706,7 +707,6 @@ public:
 
             struct promise_type
                     : BasePromise
-                    , CreateStack<promise_type, Stack>
                     , std::conditional_t<std::is_void_v<T>,
                                          ReturnVoid<promise_type>,
                                          ReturnValue<promise_type>> {
@@ -903,8 +903,10 @@ public:
                 }
 
                 auto const now = steady_clock::now();
-                {
-                    std::lock_guard lock{delayed_tasks_mutex};
+                if (sem.try_acquire()) {
+                    ALONITE_SCOPE_EXIT {
+                        sem.release();
+                    };
                     auto const it = std::partition(delayed_tasks.begin(),
                                                    delayed_tasks.end(),
                                                    [now](auto const& p) {
@@ -922,20 +924,28 @@ public:
 
             std::this_thread::yield();
 
-            auto const soon = [](auto& mutex, auto& resource) {
-                auto const now = steady_clock::now() + 10ms;
-                std::lock_guard lock(mutex);
-                auto const soon_work =
-                        std::min_element(resource.begin(),
-                                         resource.end(),
-                                         [](auto const& lhs, auto const& rhs) {
-                                             return lhs.second < rhs.second;
-                                         });
-                return soon_work != resource.end() ? std::min(now, soon_work->second)
-                                                   : now;
-            }();
+            if (sem.try_acquire()) {
+                ALONITE_SCOPE_EXIT {
+                    sem.release();
+                };
+                if (auto const x = std::min_element(delayed_tasks.begin(),
+                                                    delayed_tasks.end(),
+                                                    [](auto const& lhs, auto const& rhs) {
+                                                        return lhs.second < rhs.second;
+                                                    });
+                    x != delayed_tasks.end()) {
+                    std::this_thread::sleep_until(x->second);
+                } else {
+                    if (work.load(std::memory_order_relaxed) == 0) {
+                        break;
+                    } else {
+                        std::this_thread::sleep_for(5ms);
+                    }
+                }
+            }
 
-            std::this_thread::sleep_until(soon);
+            sem.acquire();
+            sem.release();
         }
 
         return t.stack->template take_result<T>();
@@ -973,24 +983,26 @@ public:
     }
 
     void spawn(std::function<void()>&& task, std::chrono::milliseconds after) override {
-        std::lock_guard lock{delayed_tasks_mutex};
+        sem.acquire();
+        ALONITE_SCOPE_EXIT {
+            sem.release();
+        };
         delayed_tasks.emplace_back(std::move(task),
                                    std::chrono::steady_clock::now() + after);
     }
 
     void increment_work() override {
-        ++work;
+        work.fetch_add(1, std::memory_order_relaxed);
     }
 
     void decrement_work() override {
-        --work;
+        work.fetch_sub(1, std::memory_order_relaxed);
     }
 
 private:
     std::mutex tasks_mutex;
     std::vector<Work> tasks;
 
-    std::mutex delayed_tasks_mutex;
     std::vector<DelayedWork> delayed_tasks;
 
     std::mutex spawned_tasks_mutex;
@@ -1002,6 +1014,8 @@ private:
             spawned_task_groups;
 
     std::atomic<size_t> work{0};
+
+    std::binary_semaphore sem{1};
 };
 
 class Sleep {

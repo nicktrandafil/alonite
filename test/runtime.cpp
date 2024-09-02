@@ -580,3 +580,28 @@ TEST_CASE("one canceled", "[WhenAnyDyn]") {
     }());
     REQUIRE(counter == 2);
 }
+
+TEST_CASE("value result", "[ThreadPoolExecutor::block_on][fuzz]") {
+    constexpr size_t s = 1000;
+    ThreadPoolExecutor executor;
+    std::array<int, s> res;
+    std::array<std::thread, s> ths;
+
+    for (auto j = 0; j < 5; ++j) {
+        for (auto i = 0u; i < s; ++i) {
+            ths[i] = std::thread{[&res, i, &executor] {
+                res[i] = executor.block_on([&]() -> Task<int> {
+                    co_return 1 + 1;
+                }());
+            }};
+        }
+
+        for (auto& x : ths) {
+            x.join();
+        }
+
+        for (auto x : res) {
+            REQUIRE(x == 2);
+        }
+    }
+}
