@@ -4,6 +4,7 @@
 
 using namespace alonite;
 using namespace std::chrono_literals;
+using namespace std::chrono;
 
 TEST_CASE("value result", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
@@ -74,12 +75,12 @@ TEST_CASE("await for result", "[spawn]") {
 
 TEST_CASE("ignore result", "[Sleep]") {
     ThisThreadExecutor executor;
-    auto const start = std::chrono::steady_clock::now();
+    auto const start = steady_clock::now();
     executor.block_on([&]() -> Task<void> {
         co_await Sleep{5ms};
         co_return;
     }());
-    auto const end = std::chrono::steady_clock::now();
+    auto const end = steady_clock::now();
     REQUIRE(5ms <= end - start);
     REQUIRE(end - start < 10ms);
 }
@@ -95,6 +96,23 @@ TEST_CASE("ignore result", "[spawn]") {
         co_return;
     }());
     REQUIRE(run);
+}
+
+TEST_CASE("sleep in parallel", "[spawn]") {
+    ThisThreadExecutor executor;
+    auto const start = steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        spawn([&]() -> Task<void> {
+            co_await Sleep{10ms};
+        }());
+        spawn([&]() -> Task<void> {
+            co_await Sleep{10ms};
+        }());
+        co_return;
+    }());
+    auto const elapsed = steady_clock::now() - start;
+    REQUIRE(10ms <= elapsed);
+    REQUIRE(elapsed <= 12ms);
 }
 
 TEST_CASE("use some sleep to actually enter the block_on loop", "[spawn]") {
@@ -206,11 +224,11 @@ TEST_CASE(
         ConditionalVariable cv;
 
         spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
-            auto const start = std::chrono::steady_clock::now();
+            auto const start = steady_clock::now();
 
             co_await cv->wait();
 
-            auto const elapsed = std::chrono::steady_clock::now() - start;
+            auto const elapsed = steady_clock::now() - start;
 
             *counter += 2;
 
@@ -354,7 +372,7 @@ TEST_CASE("one int task and one void with sleeps", "[WhenAll]") {
     ThisThreadExecutor executor;
     int counter1 = 0;
     int counter2 = 0;
-    auto const start = std::chrono::steady_clock::now();
+    auto const start = steady_clock::now();
     executor.block_on([&]() -> Task<void> {
         auto const tmp = co_await WhenAll{[](auto& x) -> Task<int> {
                                               co_await Sleep{1ms};
@@ -369,7 +387,7 @@ TEST_CASE("one int task and one void with sleeps", "[WhenAll]") {
         counter1 += 2;
         REQUIRE(tmp == std::tuple{2, Void<>{}});
     }());
-    auto const elapsed = std::chrono::steady_clock::now() - start;
+    auto const elapsed = steady_clock::now() - start;
     REQUIRE(counter1 == 3);
     REQUIRE(counter2 == 1);
     REQUIRE(2ms < elapsed);
@@ -379,7 +397,7 @@ TEST_CASE("one int task and one void with sleeps", "[WhenAll]") {
 TEST_CASE("check tasks execute simultaneously", "[WhenAll]") {
     ThisThreadExecutor executor;
     int counter = 2;
-    auto const start = std::chrono::steady_clock::now();
+    auto const start = steady_clock::now();
     executor.block_on([&]() -> Task<void> {
         co_await WhenAll{[](auto& x) -> Task<void> {
                              co_await Sleep{2ms};
@@ -394,7 +412,7 @@ TEST_CASE("check tasks execute simultaneously", "[WhenAll]") {
                              x *= 5;
                          }(counter)};
     }());
-    auto const elapsed = std::chrono::steady_clock::now() - start;
+    auto const elapsed = steady_clock::now() - start;
     REQUIRE(counter == 2 * (2 * 3) * (4 * 5));
     REQUIRE(4ms < elapsed);
 #ifdef NDEBUG
@@ -406,7 +424,7 @@ TEST_CASE("two voids with sleeps", "[WhenAllDyn]") {
     ThisThreadExecutor executor;
     int counter1 = 0;
     int counter2 = 0;
-    auto const start = std::chrono::steady_clock::now();
+    auto const start = steady_clock::now();
     executor.block_on([&]() -> Task<void> {
         std::vector<Task<void>> tasks;
 
@@ -427,7 +445,7 @@ TEST_CASE("two voids with sleeps", "[WhenAllDyn]") {
         counter1 += 2;
         REQUIRE(tmp == std::vector{Void<>{}, Void<>{}});
     }());
-    auto const elapsed = std::chrono::steady_clock::now() - start;
+    auto const elapsed = steady_clock::now() - start;
     REQUIRE(counter1 == 3);
     REQUIRE(counter2 == 1);
     REQUIRE(2ms < elapsed);
@@ -455,7 +473,7 @@ TEST_CASE("an int", "[WhenAllDyn]") {
 TEST_CASE("check tasks execute simultaneously", "[WhenAllDyn]") {
     ThisThreadExecutor executor;
     int counter = 2;
-    auto const start = std::chrono::steady_clock::now();
+    auto const start = steady_clock::now();
     executor.block_on([&]() -> Task<void> {
         std::vector<Task<void>> tasks;
 
@@ -475,7 +493,7 @@ TEST_CASE("check tasks execute simultaneously", "[WhenAllDyn]") {
 
         co_await WhenAllDyn{std::move(tasks)};
     }());
-    auto const elapsed = std::chrono::steady_clock::now() - start;
+    auto const elapsed = steady_clock::now() - start;
     REQUIRE(counter == 2 * (2 * 3) * (4 * 5));
     REQUIRE(4ms < elapsed);
 #ifdef NDEBUG
@@ -525,6 +543,26 @@ TEST_CASE("one void task, one int which should be canceled", "[WhenAny]") {
         REQUIRE(tmp == std::variant<Void<>, int>{Void<>{}});
     }());
     REQUIRE(counter == 2);
+}
+
+TEST_CASE("anyh of 5ms and 10ms is 5ms", "[WhenAny]") {
+    // ThisThreadExecutor doesn't work here, because it is not time
+    // precise. It intentionally doesn't employ conditional variable
+    // to optimize for speed.
+
+    ThreadPoolExecutor executor;
+    auto const start = steady_clock::now();
+    executor.block_on([&]() -> Task<void> {
+        co_await WhenAny{[]() -> Task<void> {
+                             co_await Sleep{13ms};
+                         }(),
+                         []() -> Task<void> {
+                             co_await Sleep{40ms};
+                         }()};
+    }());
+    auto const elapsed = steady_clock::now() - start;
+    REQUIRE(13ms <= elapsed);
+    REQUIRE(elapsed <= 14ms);
 }
 
 TEST_CASE("one void", "[WhenAnyDyn]") {
@@ -581,13 +619,13 @@ TEST_CASE("one canceled", "[WhenAnyDyn]") {
     REQUIRE(counter == 2);
 }
 
-TEST_CASE("value result", "[ThreadPoolExecutor::block_on][fuzz]") {
-    constexpr size_t s = 1000;
+TEST_CASE("check reentrant", "[ThreadPoolExecutor::block_on][fuzz]") {
+    constexpr size_t s = 10;
     ThreadPoolExecutor executor;
     std::array<int, s> res;
     std::array<std::thread, s> ths;
 
-    for (auto j = 0; j < 5; ++j) {
+    for (auto j = 0; j < 100; ++j) {
         for (auto i = 0u; i < s; ++i) {
             ths[i] = std::thread{[&res, i, &executor] {
                 res[i] = executor.block_on([&]() -> Task<int> {
@@ -604,4 +642,92 @@ TEST_CASE("value result", "[ThreadPoolExecutor::block_on][fuzz]") {
             REQUIRE(x == 2);
         }
     }
+}
+
+TEST_CASE("check actual 2 threads do the tasks", "[ThreadPoolExecutor::block_on]") {
+    using namespace std::chrono_literals;
+    ThreadPoolExecutor executor;
+
+    auto const start = steady_clock::now();
+
+    std::thread t1{[&] {
+        executor.block_on([]() -> Task<void> {
+            co_await Sleep{10ms};
+        }());
+    }};
+
+    std::thread t2{[&] {
+        executor.block_on([]() -> Task<void> {
+            co_await Sleep{10ms};
+        }());
+    }};
+
+    t1.join();
+    t2.join();
+
+    auto const elapsed = steady_clock::now() - start;
+
+    REQUIRE(10ms <= elapsed);
+    REQUIRE(elapsed <= 13ms);
+}
+
+TEST_CASE("block current thread, other tasks should get progress",
+          "[ThreadPoolExecutor::block_on]") {
+    using namespace std::chrono_literals;
+    ThreadPoolExecutor executor;
+
+    auto const start = steady_clock::now();
+
+    std::thread t1{[&] {
+        executor.block_on([]() -> Task<void> {
+            co_await Sleep{17ms};
+        }());
+    }};
+
+    std::thread t2{[&] {
+        executor.block_on([]() -> Task<void> {
+            auto j1 = []() -> Task<void> {
+                std::this_thread::sleep_for(5ms);
+                co_return;
+            }();
+
+            auto j2 = []() -> Task<void> {
+                std::this_thread::sleep_for(20ms);
+                co_return;
+            }();
+
+            co_await WhenAll{std::move(j1), std::move(j2)};
+        }());
+    }};
+
+    t1.join();
+    t2.join();
+
+    auto const elapsed = steady_clock::now() - start;
+
+    REQUIRE(20ms <= elapsed);
+    REQUIRE(elapsed <= 21ms);
+}
+
+TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
+    ThreadPoolExecutor exec;
+
+    std::binary_semaphore s{0};
+    std::thread t{[&] {
+        exec.block_on([](auto& s) -> Task<void> {
+            s.release();
+            co_await Sleep{10ms};
+        }(s));
+    }};
+    s.acquire();
+
+    auto const start = steady_clock::now();
+    exec.block_on([]() -> Task<void> {
+        co_return;
+    }());
+    auto const elapsed = steady_clock::now() - start;
+
+    t.join();
+
+    REQUIRE(elapsed >= 10ms);
 }

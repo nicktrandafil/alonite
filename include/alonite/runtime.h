@@ -3,8 +3,11 @@
 #include "contract.h"
 #include "scope_exit.h"
 
+#include <queue>
+
 #include <any>
 #include <atomic>
+#include <condition_variable>
 #include <coroutine>
 #include <cstdio>
 #include <cstring>
@@ -12,7 +15,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <semaphore>
 #include <stack>
 #include <thread>
 #include <type_traits>
@@ -37,14 +39,41 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
 
 class TaskStack;
 
+class Work {
+public:
+    explicit Work(std::function<void()>&& work) noexcept
+            : work{std::move(work)} {
+    }
+
+    explicit Work(std::function<void()>&& work,
+                  std::weak_ptr<TaskStack>&& canceled) noexcept
+            : work{std::move(work)}
+            , canceled_{std::move(canceled)} {
+    }
+
+    bool canceled() const noexcept {
+        return canceled_ ? !canceled_->lock() : false;
+    }
+
+    void operator()() && {
+        std::move(work)();
+    }
+
+private:
+    std::function<void()> work;
+    std::optional<std::weak_ptr<TaskStack>> canceled_;
+};
+
+using DelayedWork = std::pair<Work, std::chrono::steady_clock::time_point>;
+
 struct Executor {
     static unsigned next_id() noexcept {
         static std::atomic<unsigned> id = 0;
         return ++id;
     }
 
-    virtual void spawn(std::function<void()>&& task) = 0;
-    virtual void spawn(std::function<void()>&& task, std::chrono::milliseconds after) = 0;
+    virtual void spawn(Work&& task) = 0;
+    virtual void spawn(Work&& task, std::chrono::milliseconds after) = 0;
     virtual bool remove_guard(TaskStack* x) noexcept = 0;
     virtual void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) = 0;
     virtual void add_guard_group(
@@ -228,11 +257,11 @@ inline thread_local Executor* current_executor = nullptr;
 
 inline void schedule(std::shared_ptr<TaskStack>&& stack) {
     stack->erased_top().ex->spawn(
-            [feature(stack = std::move(stack),
-                     "Have both abort signal and ready result set in JoinHandle "
-                     "in case of a race condition")] {
+            Work{[feature(stack = std::move(stack),
+                          "Have both abort signal and ready result set in JoinHandle "
+                          "in case of a race condition")] {
                 stack->erased_top().co.resume();
-            });
+            }});
 }
 
 /// \post will not move if the `stack` is not scheduled
@@ -688,15 +717,15 @@ struct TaskStackPtrEqual {
     }
 };
 
-using Work = std::function<void()>;
-using DelayedWork =
-        std::pair<std::function<void()>, std::chrono::steady_clock::time_point>;
+struct PqGreater {
+    bool operator()(auto const& x, auto const& y) const noexcept {
+        return x.second > y.second;
+    }
+};
 
 class ThisThreadExecutor final : public Executor {
 public:
-    ThisThreadExecutor() {
-        tasks.reserve(r);
-    }
+    ThisThreadExecutor() = default;
 
     template <class T>
     T block_on(Task<T> task) noexcept(false) {
@@ -745,25 +774,18 @@ public:
 
             do {
                 std::vector<Work> tasks2;
-                tasks2.reserve(r);
                 std::swap(tasks, tasks2);
-                for (auto& task : tasks2) {
-                    std::move(task)();
-                }
 
                 auto const now = steady_clock::now();
-                auto const it = std::partition(
-                        delayed_tasks.begin(), delayed_tasks.end(), [now](auto const& p) {
-                            return now < p.second;
-                        });
+                while (!delayed_tasks.empty()
+                       && (delayed_tasks.top().second <= now
+                           || delayed_tasks.top().first.canceled())) {
+                    tasks2.push_back(delayed_tasks.top().first);
+                    delayed_tasks.pop();
+                }
 
-                std::vector<DelayedWork> delayed_tasks2{
-                        std::make_move_iterator(it),
-                        std::make_move_iterator(delayed_tasks.end())};
-                delayed_tasks.erase(it, delayed_tasks.end());
-
-                for (auto& task : delayed_tasks2) {
-                    std::move(task).first();
+                for (auto& task : tasks2) {
+                    std::move(task)();
                 }
             } while (!tasks.empty());
 
@@ -771,20 +793,12 @@ public:
                 break;
             }
 
-            auto const now = steady_clock::now() + 10ms;
-            std::this_thread::yield();
+            auto slumber = steady_clock::now() + 10ms;
+            if (!delayed_tasks.empty() && delayed_tasks.top().second < slumber) {
+                slumber = delayed_tasks.top().second;
+            }
 
-            auto const soon_work = std::min_element(delayed_tasks.begin(),
-                                                    delayed_tasks.end(),
-                                                    [](auto const& lhs, auto const& rhs) {
-                                                        return lhs.second < rhs.second;
-                                                    });
-
-            auto const soon = soon_work != delayed_tasks.end()
-                                    ? std::min(now, soon_work->second)
-                                    : now;
-
-            std::this_thread::sleep_until(soon);
+            std::this_thread::sleep_until(slumber);
         }
 
         return t.stack->template take_result<T>();
@@ -813,13 +827,12 @@ public:
     }
 
 private:
-    void spawn(std::function<void()>&& task) override {
+    void spawn(Work&& task) override {
         tasks.push_back(std::move(task));
     }
 
-    void spawn(std::function<void()>&& task, std::chrono::milliseconds after) override {
-        delayed_tasks.emplace_back(std::move(task),
-                                   std::chrono::steady_clock::now() + after);
+    void spawn(Work&& task, std::chrono::milliseconds after) override {
+        delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
     }
 
     void increment_work() override {
@@ -830,9 +843,8 @@ private:
         --work;
     }
 
-    static constexpr size_t r = 10;
     std::vector<Work> tasks;
-    std::vector<DelayedWork> delayed_tasks;
+    std::priority_queue<DelayedWork, std::vector<DelayedWork>, PqGreater> delayed_tasks;
     std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
             spawned_tasks;
     std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
@@ -842,6 +854,7 @@ private:
 
 class ThreadPoolExecutor : public Executor {
 public:
+    /// \post reentrant
     template <class T>
     T block_on(Task<T> task) noexcept(false) {
         current_executor = this;
@@ -883,87 +896,80 @@ public:
             co_return co_await task;
         }(std::move(task));
 
-        while (true) {
-            using std::chrono_literals::operator""ms;
-            using std::chrono::steady_clock;
+        {
+            active_threads.fetch_add(1, std::memory_order_relaxed);
+            ALONITE_SCOPE_EXIT {
+                active_threads.fetch_sub(1, std::memory_order_relaxed);
+                std::atomic_notify_all(&active_threads);
+            };
+            while (true) {
+                using std::chrono_literals::operator""ms;
+                using std::chrono::steady_clock;
 
-            std::vector<Work> tasks2;
-            std::vector<DelayedWork> delayed_tasks2;
-            do {
-                tasks2.clear();
-                delayed_tasks2.clear();
+                std::vector<Work> tasks2;
 
-                {
-                    std::lock_guard lock{tasks_mutex};
-                    std::swap(tasks, tasks2);
-                }
+                do {
+                    {
+                        std::lock_guard lock{mutex};
 
-                for (auto& task : tasks2) {
-                    std::move(task)();
-                }
+                        auto const n = std::min(32ul, tasks.size());
+                        tasks2.assign(std::make_move_iterator(begin(tasks)),
+                                      std::make_move_iterator(begin(tasks) + n));
+                        tasks.erase(begin(tasks), begin(tasks) + n);
 
-                auto const now = steady_clock::now();
-                if (sem.try_acquire()) {
-                    ALONITE_SCOPE_EXIT {
-                        sem.release();
-                    };
-                    auto const it = std::partition(delayed_tasks.begin(),
-                                                   delayed_tasks.end(),
-                                                   [now](auto const& p) {
-                                                       return now < p.second;
-                                                   });
-                    delayed_tasks2.assign(std::make_move_iterator(it),
-                                          std::make_move_iterator(delayed_tasks.end()));
-                    delayed_tasks.erase(it, delayed_tasks.end());
-                }
+                        auto const now = steady_clock::now();
+                        while (!delayed_tasks.empty()
+                               && (delayed_tasks.top().second <= now
+                                   || delayed_tasks.top().first.canceled())) {
+                            tasks2.push_back(delayed_tasks.top().first);
+                            delayed_tasks.pop();
+                        }
 
-                for (auto& task : delayed_tasks2) {
-                    std::move(task).first();
-                }
-            } while (!tasks2.empty());
-
-            std::this_thread::yield();
-
-            if (sem.try_acquire()) {
-                ALONITE_SCOPE_EXIT {
-                    sem.release();
-                };
-                if (auto const x = std::min_element(delayed_tasks.begin(),
-                                                    delayed_tasks.end(),
-                                                    [](auto const& lhs, auto const& rhs) {
-                                                        return lhs.second < rhs.second;
-                                                    });
-                    x != delayed_tasks.end()) {
-                    std::this_thread::sleep_until(x->second);
-                } else {
-                    if (work.load(std::memory_order_relaxed) == 0) {
-                        break;
-                    } else {
-                        std::this_thread::sleep_for(5ms);
+                        // need help
+                        if (!tasks.empty()) {
+                            cv.notify_one();
+                        }
                     }
+
+                    for (auto& task : tasks2) {
+                        std::move(task)();
+                    }
+                } while (!tasks2.empty());
+
+                std::unique_lock lock{mutex};
+                if (work.load(std::memory_order_relaxed) == 0 && tasks.empty()
+                    && delayed_tasks.empty()) {
+                    break;
+                } else if (!delayed_tasks.empty()) {
+                    auto const tmp = delayed_tasks.top().second;
+                    cv.wait_until(lock, tmp);
+                } else {
+                    cv.wait(lock);
                 }
             }
+        }
 
-            sem.acquire();
-            sem.release();
+        while (auto const x = active_threads.load(std::memory_order_relaxed)) {
+            cv.notify_all();
+            std::atomic_wait(&active_threads, x);
         }
 
         return t.stack->template take_result<T>();
     }
 
     void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
-        std::lock_guard lock{spawned_tasks_mutex};
+        std::lock_guard lock{mutex};
         spawned_tasks.emplace(std::move(x));
     }
 
     void add_guard_group(unsigned id, std::vector<std::shared_ptr<TaskStack>> x) noexcept(
             false) override {
-        std::lock_guard lock{spawned_task_groups_mutex};
+        std::lock_guard lock{mutex};
         spawned_task_groups.emplace(id, std::move(x));
     }
 
     bool remove_guard(TaskStack* x) noexcept override {
-        std::lock_guard lock{spawned_tasks_mutex};
+        std::lock_guard lock{mutex};
         if (auto const it = spawned_tasks.find(x); it != spawned_tasks.end()) {
             spawned_tasks.erase(it);
             return true;
@@ -973,22 +979,20 @@ public:
     }
 
     bool remove_guard_group(unsigned id) noexcept override {
-        std::lock_guard lock{spawned_task_groups_mutex};
+        std::lock_guard lock{mutex};
         return spawned_task_groups.erase(id) > 0;
     }
 
-    void spawn(std::function<void()>&& task) override {
-        std::lock_guard lock{tasks_mutex};
+    void spawn(Work&& task) override {
+        std::lock_guard lock{mutex};
         tasks.push_back(std::move(task));
+        cv.notify_one();
     }
 
-    void spawn(std::function<void()>&& task, std::chrono::milliseconds after) override {
-        sem.acquire();
-        ALONITE_SCOPE_EXIT {
-            sem.release();
-        };
-        delayed_tasks.emplace_back(std::move(task),
-                                   std::chrono::steady_clock::now() + after);
+    void spawn(Work&& task, std::chrono::milliseconds after) override {
+        std::lock_guard lock{mutex};
+        delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
+        cv.notify_one();
     }
 
     void increment_work() override {
@@ -1000,22 +1004,16 @@ public:
     }
 
 private:
-    std::mutex tasks_mutex;
-    std::vector<Work> tasks;
-
-    std::vector<DelayedWork> delayed_tasks;
-
-    std::mutex spawned_tasks_mutex;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<Work> tasks;
+    std::priority_queue<DelayedWork, std::vector<DelayedWork>, PqGreater> delayed_tasks;
     std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
             spawned_tasks;
-
-    std::mutex spawned_task_groups_mutex;
     std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
             spawned_task_groups;
-
     std::atomic<size_t> work{0};
-
-    std::binary_semaphore sem{1};
+    std::atomic<unsigned> active_threads{0};
 };
 
 class Sleep {
@@ -1033,11 +1031,12 @@ public:
         auto caller_stack = caller.promise().stack.lock();
         alonite_assert(caller_stack, Invariant{});
         caller_stack->erased_top().ex->spawn(
-                [caller_stack = std::weak_ptr{caller_stack}]() mutable {
-                    if (auto const r = caller_stack.lock()) {
-                        r->erased_top().co.resume();
-                    }
-                },
+                Work{[caller_stack = std::weak_ptr{caller_stack}]() mutable {
+                         if (auto const r = caller_stack.lock()) {
+                             r->erased_top().co.resume();
+                         }
+                     },
+                     std::weak_ptr{caller_stack}},
                 dur);
     }
 
@@ -1127,15 +1126,17 @@ public:
         this->stack = task_wrapper.stack;
         task_wrapper.co.promise().continuation = caller.promise().stack;
         current_executor->add_guard(std::shared_ptr{task_wrapper.stack});
-        current_executor->spawn(
-                [stack = std::weak_ptr{std::move(task_wrapper.stack)},
-                 continuation = caller.promise().stack]() mutable {
-                    if (auto const x = stack.lock();
-                        x && current_executor->remove_guard(x.get())) {
-                        cancel_and_continue(std::move(stack), std::move(continuation));
-                    }
-                },
-                this->dur);
+        current_executor->spawn(Work{[stack = std::weak_ptr{task_wrapper.stack},
+                                      continuation = caller.promise().stack]() mutable {
+                                         if (auto const x = stack.lock();
+                                             x
+                                             && current_executor->remove_guard(x.get())) {
+                                             cancel_and_continue(std::move(stack),
+                                                                 std::move(continuation));
+                                         }
+                                     },
+                                     std::weak_ptr{task_wrapper.stack}},
+                                this->dur);
 
         return task_wrapper.co;
     }
@@ -1152,10 +1153,11 @@ private:
     static void cancel_and_continue(std::weak_ptr<TaskStack>&& stack,
                                     std::weak_ptr<TaskStack>&& continuation) {
         if (stack.lock()) {
-            current_executor->spawn([stack = std::move(stack),
-                                     continuation = std::move(continuation)]() mutable {
-                cancel_and_continue(std::move(stack), std::move(continuation));
-            });
+            current_executor->spawn(
+                    Work{[stack = std::move(stack),
+                          continuation = std::move(continuation)]() mutable {
+                        cancel_and_continue(std::move(stack), std::move(continuation));
+                    }});
         } else if (auto x = continuation.lock();
                    x
                    && !schedule_on_other_ex(
@@ -1433,7 +1435,9 @@ public:
     std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
         continuation = caller.promise().stack;
 
-        if (auto const x = continuation.lock()) {
+        {
+            auto const x = continuation.lock();
+            alonite_assert(x, Invariant{});
             x->tasks_to_complete = x->completed_task_index = sizeof...(TaskT);
         }
 
