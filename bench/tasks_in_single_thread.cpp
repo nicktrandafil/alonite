@@ -230,15 +230,6 @@ int main() {
             i = exec.block_on(my_coro_work_3s());
         }};
 
-        // add help
-        // for (auto i = 0u; i < 1; ++i) {
-        //     std::thread{[&] {
-        //         exec.block_on([]() -> Task<void> {
-        //             co_return;
-        //         }());
-        //     }}.detach();
-        // }
-
         t1.join();
 
         auto const end = std::chrono::steady_clock::now();
@@ -268,13 +259,6 @@ int main() {
                     i = co_await boost_coro_work_3s();
                 },
                 boost::asio::detached);
-
-        // add help
-        // for (auto i = 0u; i < 1; ++i) {
-        //     std::thread{[&] {
-        //         io.run();
-        //     }}.detach();
-        // }
 
         io.run();
 
@@ -333,8 +317,6 @@ int main() {
         auto const [send, recv] = exec.block_on(my_coro_channel_throughput());
 
         auto const end = std::chrono::steady_clock::now();
-
-        std::cout << "send: " << send << ", recv: " << recv << "\n";
 
         std::cout << "elapsed: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
