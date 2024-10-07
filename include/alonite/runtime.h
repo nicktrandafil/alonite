@@ -1586,4 +1586,23 @@ inline JoinHandle<T> spawn(Task<T>&& task) noexcept(false) {
     return t;
 }
 
+class Yield {
+public:
+    bool await_ready() const noexcept {
+        return false;
+    }
+
+    template <class T>
+    void await_suspend(std::coroutine_handle<T> caller) noexcept {
+        current_executor->spawn(Work{[continuation = caller.promise().stack]() mutable {
+            if (auto const x = continuation.lock()) {
+                x->erased_top().co.resume();
+            }
+        }});
+    }
+
+    void await_resume() const noexcept {
+    }
+};
+
 } // namespace alonite

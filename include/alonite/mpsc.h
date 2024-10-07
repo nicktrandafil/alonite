@@ -35,7 +35,7 @@ public:
     }
 
 private:
-    std::list<T> queue;
+    std::deque<T> queue;
     ConditionalVariable cv;
 };
 
