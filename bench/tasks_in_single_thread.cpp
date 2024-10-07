@@ -162,6 +162,49 @@ static alonite::Task<std::pair<size_t, size_t>> my_coro_channel_throughput() {
     co_return std::pair{send, recv};
 }
 
+static boost::asio::awaitable<size_t> boost_coro_runtime_overhead() {
+    using namespace boost::asio;
+    using namespace boost::asio::experimental::awaitable_operators;
+
+    size_t yields = 0;
+
+    auto const work = [&]() -> awaitable<void> {
+        for (size_t i = 0; i < 100'000'000; ++i) {
+            ++yields;
+            co_await boost::asio::post(co_await boost::asio::this_coro::executor,
+                                       boost::asio::use_awaitable);
+        }
+    };
+
+    co_await ([&]() -> awaitable<void> {
+        co_await work();
+    }() || steady_timer{co_await this_coro::executor, 3s}.async_wait(use_awaitable));
+
+    co_return yields;
+}
+
+static alonite::Task<size_t> my_coro_runtime_overhead() {
+    using namespace alonite;
+
+    size_t yields = 0;
+
+    auto const work = [&]() -> Task<void> {
+        for (size_t i = 0; i < 100'000'000; ++i) {
+            ++yields;
+            co_await Yield{};
+        }
+    };
+
+    co_await WhenAny{[&]() -> Task<void> {
+                         co_await work();
+                     }(),
+                     []() -> Task<void> {
+                         co_await Sleep{3s};
+                     }()};
+
+    co_return yields;
+}
+
 int main() {
     {
         std::cout << "my coro - when all 10k\n";
@@ -294,8 +337,6 @@ int main() {
 
         auto const end = std::chrono::steady_clock::now();
 
-        std::cout << "send: " << send << ", recv: " << recv << "\n";
-
         std::cout << "elapsed: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
                   << "\n";
@@ -324,5 +365,56 @@ int main() {
 
         std::cout << "send throughput: " << send / 3 << " msg/s\n";
         std::cout << "recv throughput: " << recv / 3 << " msg/s\n";
+    }
+
+    {
+        std::cout << "boost coro - runtime overhead\n";
+
+        using namespace std::chrono_literals;
+        using namespace boost::asio;
+
+        io_context io;
+
+        auto const start = std::chrono::steady_clock::now();
+
+        size_t yields = 0;
+
+        boost::asio::co_spawn(
+                io,
+                [&yields]() -> boost::asio::awaitable<void> {
+                    yields = co_await boost_coro_runtime_overhead();
+                },
+                boost::asio::detached);
+
+        io.run();
+
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+
+        std::cout << "yield throughput: " << yields / 3 << " yields/s\n";
+    }
+
+    {
+        std::cout << "my coro - runtime overhead\n";
+
+        using namespace std::chrono_literals;
+        using namespace alonite;
+
+        ThreadPoolExecutor exec;
+
+        auto const start = std::chrono::steady_clock::now();
+
+        auto const yields = exec.block_on(my_coro_runtime_overhead());
+
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+
+        std::cout << "yield throughput: " << yields / 3 << " yields/s\n";
     }
 }

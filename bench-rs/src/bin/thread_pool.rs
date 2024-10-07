@@ -65,4 +65,24 @@ async fn main() {
         println!("{}ms", ts.elapsed().as_millis());
         println!("acc {}", acc);
     }
+
+    {
+        // measure how many yields it can do in 3s
+
+        println!("rust yield - works in 3s");
+
+        let ts = std::time::Instant::now();
+
+        let mut i = 0;
+        _ = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                i += 1;
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        println!("{}ms", ts.elapsed().as_millis());
+        println!("{} yields/s", i / 3);
+    }
 }
