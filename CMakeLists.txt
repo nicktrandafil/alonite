@@ -33,12 +33,12 @@ find_package(Catch2 REQUIRED QUIET)
 target_link_libraries(test_alonite PRIVATE alonite Catch2::Catch2WithMain)
 set_target_build_settings(test_alonite WARNINGS_ARE_ERRORS ${alonite_WARNINGS_ARE_ERRORS})
 
-add_executable(bench_tasks_in_single_thread
-    bench/tasks_in_single_thread.cpp
+add_executable(bench_alonite
+    bench/runtime.cpp
 )
 find_package(Boost REQUIRED COMPONENTS system)
-target_link_libraries(bench_tasks_in_single_thread PRIVATE alonite Boost::boost Boost::system)
-set_target_build_settings(bench_tasks_in_single_thread WARNINGS_ARE_ERRORS ${alonite_WARNINGS_ARE_ERRORS})
+target_link_libraries(bench_alonite PRIVATE alonite Boost::boost Boost::system)
+set_target_build_settings(bench_alonite WARNINGS_ARE_ERRORS ${alonite_WARNINGS_ARE_ERRORS})
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES ${CMAKE_BINARY_DIR}/dcov "${CMAKE_BINARY_DIR}/cov.sh")
