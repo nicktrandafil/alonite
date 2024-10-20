@@ -1006,7 +1006,7 @@ public:
 private:
     std::mutex mutex;
     std::condition_variable cv;
-    std::deque<Work> tasks;
+    std::vector<Work> tasks;
     std::priority_queue<DelayedWork, std::vector<DelayedWork>, PqGreater> delayed_tasks;
     std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
             spawned_tasks;
