@@ -5,7 +5,6 @@ project(alonite VERSION 0.1 LANGUAGES CXX)
 include(cmake/common.cmake)
 
 add_library(alonite INTERFACE 
-    include/alonite/allocator.h
     include/alonite/contract.h
     include/alonite/log.h
     include/alonite/mpsc.h
