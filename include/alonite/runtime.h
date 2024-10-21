@@ -1,5 +1,6 @@
 #pragma once
 
+#include "allocator.h"
 #include "contract.h"
 #include "scope_exit.h"
 
@@ -12,6 +13,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -32,6 +34,13 @@
 #define feature(x, msg) x
 
 namespace alonite {
+
+inline constexpr auto promise_size = 16u;
+
+using PromiseFreeListAllocator =
+        allocator::FreeList<allocator::Mallocator, promise_size, promise_size>;
+
+inline thread_local PromiseFreeListAllocator alloc{allocator::Mallocator{}};
 
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
@@ -62,6 +71,41 @@ public:
 private:
     std::function<void()> work;
     std::optional<std::weak_ptr<TaskStack>> canceled_;
+};
+
+using WorkFreeListAllocator = allocator::FreeList<allocator::Mallocator, 64, 504>;
+
+inline thread_local WorkFreeListAllocator alloc_work{allocator::Mallocator{}};
+
+template <class T>
+struct WorkAllocator {
+    using value_type = T;
+
+    WorkAllocator() = default;
+    WorkAllocator(WorkAllocator const&) = default;
+
+    template <class U>
+    WorkAllocator(WorkAllocator<U> const&) noexcept {
+    }
+
+    using propagate_on_container_copy_assignment = std::true_type;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap = std::true_type;
+
+    value_type* allocate(std::size_t n) const {
+        std::cout << "foo " << sizeof(value_type) * n << "\n";
+        return static_cast<value_type*>(alloc_work.allocate(sizeof(value_type) * n).ptr);
+    }
+
+    void deallocate(value_type* p, std::size_t n) const {
+        std::cout << "boo " << sizeof(value_type) * n << "\n";
+        alloc_work.deallocate(allocator::Blk{p, sizeof(value_type) * n});
+    }
+
+    template <class U>
+    bool operator==(WorkAllocator<U> const&) const noexcept {
+        return true;
+    }
 };
 
 using DelayedWork = std::pair<Work, std::chrono::steady_clock::time_point>;
@@ -387,7 +431,16 @@ public:
             stack->pop();
             return FinalAwaiter{std::move(stack)};
         }
+
+        void* operator new(std::size_t n) {
+            return alloc.allocate(n).ptr;
+        }
+
+        void operator delete(void* ptr) {
+            alloc.deallocate(allocator::Blk{ptr, promise_size});
+        }
     };
+    static_assert(sizeof(promise_type) == promise_size);
 
     bool await_ready() const noexcept {
         return false;
@@ -906,7 +959,7 @@ public:
                 using std::chrono_literals::operator""ms;
                 using std::chrono::steady_clock;
 
-                std::vector<Work> tasks2;
+                std::deque<Work, WorkAllocator<Work>> tasks2;
 
                 do {
                     {
@@ -1006,7 +1059,7 @@ public:
 private:
     std::mutex mutex;
     std::condition_variable cv;
-    std::vector<Work> tasks;
+    std::deque<Work, WorkAllocator<Work>> tasks;
     std::priority_queue<DelayedWork, std::vector<DelayedWork>, PqGreater> delayed_tasks;
     std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
             spawned_tasks;
