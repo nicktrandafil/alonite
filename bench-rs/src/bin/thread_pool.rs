@@ -1,7 +1,19 @@
-use std::time::Duration;
+use std::{future::Future, pin::Pin, time::Duration};
 
 async fn work(_: usize) {
     tokio::time::sleep(Duration::from_secs(0)).await;
+}
+
+fn fib(n: u64) -> Pin<Box<dyn Future<Output = u64>>> {
+    Box::pin(async move {
+        if n < 2 {
+            return n;
+        }
+
+        let (a, b) = futures::join!(fib(n - 1), fib(n - 2));
+
+        a + b
+    })
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 1)]
@@ -84,5 +96,15 @@ async fn main() {
 
         println!("{}ms", ts.elapsed().as_millis());
         println!("{} yields/s", i / 3);
+    }
+
+    {
+        // measure how long it takes to compute fib(30)
+
+        println!("rust fib - works in 3s");
+
+        let ts = std::time::Instant::now();
+        println!("fib(30)={}", fib(34).await);
+        println!("{}ms", ts.elapsed().as_millis());
     }
 }

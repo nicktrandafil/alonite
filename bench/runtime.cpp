@@ -27,6 +27,28 @@ static alonite::Task<void> my_coro_when_all_10k() {
     co_await alonite::WhenAllDyn{std::move(tasks)};
 }
 
+static boost::asio::awaitable<void> boost_when_all_10k() {
+    auto const ex = co_await boost::asio::this_coro::executor;
+
+    auto const work = [](unsigned i) -> boost::asio::awaitable<void> {
+        co_await boost::asio::steady_timer{co_await boost::asio::this_coro::executor, 1ms}
+                .async_wait(boost::asio::use_awaitable);
+        global += i;
+        co_return;
+    };
+
+    std::vector<decltype(boost::asio::co_spawn(ex, work(0), boost::asio::deferred))>
+            tasks;
+    tasks.reserve(10'000);
+    for (unsigned i = 0; i < 10'000; ++i) {
+        tasks.push_back(boost::asio::co_spawn(ex, work(i), boost::asio::deferred));
+    }
+
+    co_await boost::asio::experimental::make_parallel_group(std::move(tasks))
+            .async_wait(boost::asio::experimental::wait_for_all(),
+                        boost::asio::use_awaitable);
+}
+
 static boost::asio::awaitable<void> boost_spawn_10k() {
     for (unsigned i = 0; i < 10'000; ++i) {
         boost::asio::co_spawn(
@@ -205,6 +227,32 @@ static alonite::Task<size_t> my_coro_runtime_overhead() {
     co_return yields;
 }
 
+static alonite::Task<long> my_coro_fib(int n) {
+    if (n < 2) {
+        co_return n;
+    }
+
+    auto a = my_coro_fib(n - 1);
+    auto b = my_coro_fib(n - 2);
+
+    auto [x, y] = co_await alonite::WhenAll(std::move(a), std::move(b));
+
+    co_return x + y;
+}
+
+static boost::asio::awaitable<long> boost_coro_fib(int n) {
+    using namespace boost::asio;
+    using namespace boost::asio::experimental::awaitable_operators;
+
+    if (n < 2) {
+        co_return n;
+    }
+
+    auto [x, y] = co_await (boost_coro_fib(n - 1) && boost_coro_fib(n - 2));
+
+    co_return x + y;
+}
+
 int main() {
     {
         std::cout << "my coro - when all 10k\n";
@@ -225,11 +273,11 @@ int main() {
     global = 0;
 
     {
-        std::cout << "boost coro - spawn 10k\n";
+        std::cout << "boost coro - when all 10k\n";
         boost::asio::io_context io;
-        boost::asio::co_spawn(io, boost_spawn_10k(), boost::asio::detached);
 
         auto const start = std::chrono::steady_clock::now();
+        boost::asio::co_spawn(io, boost_when_all_10k(), boost::asio::detached);
         io.run();
         auto const end = std::chrono::steady_clock::now();
 
@@ -257,8 +305,29 @@ int main() {
                   << "\n";
     }
 
+    std::cout << "------------------\n";
+
+    global = 0;
+
     {
-        std::cout << "my coro - works in 3s\n";
+        std::cout << "boost coro - spawn 10k\n";
+        boost::asio::io_context io;
+
+        auto const start = std::chrono::steady_clock::now();
+        boost::asio::co_spawn(io, boost_spawn_10k(), boost::asio::detached);
+        io.run();
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "result: " << global << "\n";
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+    }
+
+    std::cout << "------------------\n";
+
+    {
+        std::cout << "my coro - works in 1s\n";
 
         using namespace std::chrono_literals;
         using namespace alonite;
@@ -277,11 +346,13 @@ int main() {
 
         auto const end = std::chrono::steady_clock::now();
 
-        std::cout << i << " works in 3s\n";
+        std::cout << i / 3 << " works in 1s\n";
         std::cout << "elapsed: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
                   << "\n";
     }
+
+    std::cout << "------------------\n";
 
     {
         std::cout << "boost coro - works in 3s\n";
@@ -307,11 +378,13 @@ int main() {
 
         auto const end = std::chrono::steady_clock::now();
 
-        std::cout << i << " works in 3s\n";
+        std::cout << i / 3 << " works in 1s\n";
         std::cout << "elapsed: "
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
                   << "\n";
     }
+
+    std::cout << "------------------\n";
 
     {
         std::cout << "boost coro - channel throughput\n";
@@ -345,6 +418,8 @@ int main() {
         std::cout << "recv throughput: " << recv / 3 << " msg/s\n";
     }
 
+    std::cout << "------------------\n";
+
     {
         std::cout << "my coro - channel throughput\n";
 
@@ -366,6 +441,8 @@ int main() {
         std::cout << "send throughput: " << send / 3 << " msg/s\n";
         std::cout << "recv throughput: " << recv / 3 << " msg/s\n";
     }
+
+    std::cout << "------------------\n";
 
     {
         std::cout << "boost coro - runtime overhead\n";
@@ -397,6 +474,8 @@ int main() {
         std::cout << "yield throughput: " << yields / 3 << " yields/s\n";
     }
 
+    std::cout << "------------------\n";
+
     {
         std::cout << "my coro - runtime overhead\n";
 
@@ -416,5 +495,58 @@ int main() {
                   << "\n";
 
         std::cout << "yield throughput: " << yields / 3 << " yields/s\n";
+    }
+
+    std::cout << "------------------\n";
+
+    {
+        std::cout << "my coro - fib(30)\n";
+
+        using namespace std::chrono_literals;
+        using namespace alonite;
+
+        ThreadPoolExecutor exec;
+
+        auto const start = std::chrono::steady_clock::now();
+
+        auto const fib = exec.block_on(my_coro_fib(30));
+
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+
+        std::cout << "fib(30)=" << fib << "\n";
+    }
+
+    std::cout << "------------------\n";
+
+    {
+        std::cout << "boost coro - fib(30)\n";
+
+        using namespace std::chrono_literals;
+        using namespace boost::asio;
+        using namespace boost::asio::experimental;
+
+        io_context io;
+
+        long x;
+        auto const start = std::chrono::steady_clock::now();
+        boost::asio::co_spawn(
+                io,
+                [&]() -> boost::asio::awaitable<void> {
+                    x = co_await boost_coro_fib(30);
+                },
+                boost::asio::detached);
+
+        io.run();
+        auto const end = std::chrono::steady_clock::now();
+
+        std::cout << "elapsed: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end - start)
+                  << "\n";
+
+        std::cout << "fib(30)=" << x << "\n";
     }
 }

@@ -9,9 +9,9 @@ async fn increment1(i: u32) {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // measure the time it takes to spawn 10,000 tasks
+    // measure the time it takes to spawn and wait 10,000 tasks
     {
-        println!("rust coro");
+        println!("rust coro - spawn and wait 10k");
 
         let ts = std::time::Instant::now();
 
@@ -27,9 +27,9 @@ async fn main() {
         println!("{}ms", ts.elapsed().as_millis());
     }
 
-    // measure the time it takes to spawn 10,000 tasks and not await
+    // measure the time it takes to spawn and not wait for 10,000 tasks
     {
-        println!("rust coro no await");
+        println!("rust coro - spawn 10k");
 
         let ts = std::time::Instant::now();
 
