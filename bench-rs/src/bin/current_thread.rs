@@ -27,6 +27,8 @@ async fn main() {
         println!("{}ms", ts.elapsed().as_millis());
     }
 
+    println!("---");
+
     // measure the time it takes to spawn and not wait for 10,000 tasks
     {
         println!("rust coro - spawn 10k");

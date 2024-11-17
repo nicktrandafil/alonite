@@ -21,7 +21,7 @@ async fn main() {
     {
         // measure how many 0s sleeps it can do in 3s
 
-        println!("rust coro - works in 3s");
+        println!("rust coro - work/sleep throughput");
 
         let ts = std::time::Instant::now();
 
@@ -34,14 +34,16 @@ async fn main() {
         })
         .await;
 
-        println!("{} works in 3s", i);
+        println!("{} works in 1s", i / 3);
         println!("{}ms", ts.elapsed().as_millis());
     }
+
+    println!("---");
 
     {
         // measure how many ints mpsc can send in 3s
 
-        println!("rust mpsc - works in 3s");
+        println!("rust mpsc - mpsc throughput");
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -78,10 +80,12 @@ async fn main() {
         println!("acc {}", acc);
     }
 
+    println!("---");
+
     {
         // measure how many yields it can do in 3s
 
-        println!("rust yield - works in 3s");
+        println!("rust coro - yield throughput");
 
         let ts = std::time::Instant::now();
 
@@ -98,10 +102,12 @@ async fn main() {
         println!("{} yields/s", i / 3);
     }
 
+    println!("---");
+
     {
         // measure how long it takes to compute fib(30)
 
-        println!("rust fib - works in 3s");
+        println!("rust coro - fib(30)");
 
         let ts = std::time::Instant::now();
         println!("fib(30)={}", fib(34).await);

@@ -327,7 +327,7 @@ int main() {
     std::cout << "------------------\n";
 
     {
-        std::cout << "my coro - works in 1s\n";
+        std::cout << "my coro - work/sleep throughput\n";
 
         using namespace std::chrono_literals;
         using namespace alonite;
@@ -355,7 +355,7 @@ int main() {
     std::cout << "------------------\n";
 
     {
-        std::cout << "boost coro - works in 3s\n";
+        std::cout << "boost coro - work/sleep throughput\n";
 
         using namespace std::chrono_literals;
         using namespace boost::asio;
