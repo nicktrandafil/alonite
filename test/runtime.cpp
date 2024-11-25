@@ -220,13 +220,13 @@ TEST_CASE("the task was already completed by the abort time", "[spawn]") {
 
 TEST_CASE(
         "spawn a task and wait on cv in it, then after 5ms notify it from the outer task",
-        "[ConditionalVariable]") {
+        "[ConditionVariable]") {
     ThisThreadExecutor executor;
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
-        ConditionalVariable cv;
+        ConditionVariable cv;
 
-        spawn([](int* counter, ConditionalVariable* cv) -> Task<void> {
+        spawn([](int* counter, ConditionVariable* cv) -> Task<void> {
             auto const start = steady_clock::now();
 
             co_await cv->wait();
@@ -252,13 +252,13 @@ TEST_CASE(
 TEST_CASE(
         "spawn two tasks and wait on cv in it, then after 5ms notify one of them, then "
         "after 5ms the other",
-        "[ConditionalVariable]") {
+        "[ConditionVariable]") {
     ThisThreadExecutor executor;
     std::vector<std::string_view> events;
     executor.block_on([&]() -> Task<void> {
-        ConditionalVariable cv;
+        ConditionVariable cv;
 
-        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
             auto const start = steady_clock::now();
 
             co_await cv->wait();
@@ -275,7 +275,7 @@ TEST_CASE(
             co_return;
         }(events, &cv));
 
-        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
             auto const start = steady_clock::now();
 
             co_await cv->wait();
@@ -302,13 +302,13 @@ TEST_CASE(
 }
 
 TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of them",
-          "[ConditionalVariable]") {
+          "[ConditionVariable]") {
     ThisThreadExecutor executor;
     std::vector<std::string_view> events;
     executor.block_on([&]() -> Task<void> {
-        ConditionalVariable cv;
+        ConditionVariable cv;
 
-        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
             auto const start = steady_clock::now();
 
             co_await cv->wait();
@@ -325,7 +325,7 @@ TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of t
             co_return;
         }(events, &cv));
 
-        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
             auto const start = steady_clock::now();
 
             co_await cv->wait();
@@ -833,3 +833,4 @@ TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
 
     REQUIRE(elapsed >= 10ms);
 }
+ConditionVariable

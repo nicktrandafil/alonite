@@ -421,15 +421,15 @@ public:
     std::weak_ptr<TaskStack> stack;
 };
 
-class ConditionalVariable {
+class ConditionVariable {
 public:
-    ConditionalVariable() = default;
+    ConditionVariable() = default;
 
-    ConditionalVariable(ConditionalVariable const&) = delete;
-    ConditionalVariable& operator=(ConditionalVariable const&) = delete;
+    ConditionVariable(ConditionVariable const&) = delete;
+    ConditionVariable& operator=(ConditionVariable const&) = delete;
 
-    ConditionalVariable(ConditionalVariable&&) = delete;
-    ConditionalVariable& operator=(ConditionalVariable&&) = delete;
+    ConditionVariable(ConditionVariable&&) = delete;
+    ConditionVariable& operator=(ConditionVariable&&) = delete;
 
     /// \note Can be called from synchronous code
     /// \note thread-safe
@@ -473,7 +473,7 @@ public:
 
 private:
     struct Awaiter {
-        Awaiter(ConditionalVariable* cv) noexcept
+        Awaiter(ConditionVariable* cv) noexcept
                 : cv{cv} {
         }
 
@@ -511,7 +511,7 @@ private:
             }
         }
 
-        ConditionalVariable* cv;
+        ConditionVariable* cv;
     };
 
     std::deque<std::weak_ptr<TaskStack>> continuations;

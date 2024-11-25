@@ -36,7 +36,7 @@ public:
 
 private:
     std::deque<T> queue;
-    ConditionalVariable cv;
+    ConditionVariable cv;
 };
 
 } // namespace detail
