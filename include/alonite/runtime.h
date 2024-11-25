@@ -33,6 +33,13 @@
 
 namespace alonite {
 
+template <class T>
+concept Awaitable = requires(T x) {
+    { x.await_ready() } -> std::convertible_to<bool>;
+    x.await_suspend(std::declval<std::coroutine_handle<>>());
+    x.await_resume();
+};
+
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
 }
@@ -271,18 +278,6 @@ inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
         && (schedule(std::move(stack)), true);
 }
 
-inline std::coroutine_handle<> resume(Executor* current_executor,
-                                      std::shared_ptr<TaskStack>&& stack) noexcept {
-    return current_executor == stack->erased_top().ex
-                 // immediately resume
-                 ? stack->erased_top().co
-                 // schedule
-                 : [stack = std::move(stack)]() mutable -> std::coroutine_handle<> {
-        schedule(std::move(stack));
-        return std::noop_coroutine();
-    }();
-}
-
 struct FinalAwaiter {
     std::shared_ptr<TaskStack> stack;
 
@@ -438,10 +433,36 @@ public:
 
     /// \note Can be called from synchronous code
     /// \note thread-safe
-    void notify() noexcept {
-        if (auto c = this->continuation.exchange({}).lock()) {
-            if (!schedule_on_other_ex(std::move(c))) {
-                c->erased_top().co.resume();
+    bool notify_one() noexcept {
+        if (auto c = [this] {
+                std::optional<std::shared_ptr<TaskStack>> ret;
+                std::lock_guard lock{mutex};
+                if (!continuations.empty()) {
+                    ret = continuations.front().lock();
+                    continuations.pop_front();
+                }
+                return ret;
+            }()) {
+            if (!schedule_on_other_ex(std::move(*c))) {
+                (*c)->erased_top().co.resume();
+            }
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    /// \note Can be called from synchronous code
+    /// \note thread-safe
+    void notify_all() noexcept {
+        for (auto const& c : [this] {
+                 std::deque<std::weak_ptr<TaskStack>> ret;
+                 std::lock_guard lock{mutex};
+                 std::swap(ret, continuations);
+                 return ret;
+             }()) {
+            if (auto x = c.lock(); x && !schedule_on_other_ex(std::move(x))) {
+                x->erased_top().co.resume();
             }
         }
     }
@@ -452,6 +473,24 @@ public:
 
 private:
     struct Awaiter {
+        Awaiter(ConditionalVariable* cv) noexcept
+                : cv{cv} {
+        }
+
+        Awaiter(Awaiter const&) = delete;
+        Awaiter& operator=(Awaiter const&) = delete;
+
+        Awaiter(Awaiter&& rhs) noexcept
+                : cv{rhs.cv} {
+            rhs.cv = nullptr;
+        }
+
+        Awaiter& operator=(Awaiter&& rhs) noexcept {
+            this->~Awaiter();
+            new (this) Awaiter{std::move(rhs)};
+            return *this;
+        }
+
         bool await_ready() const noexcept {
             return false;
         }
@@ -462,17 +501,21 @@ private:
         template <class U>
         void await_suspend(std::coroutine_handle<U> continuation) noexcept {
             current_executor->increment_work();
-            cv->continuation.store(continuation.promise().stack);
+            std::lock_guard lock{cv->mutex};
+            cv->continuations.push_back(continuation.promise().stack);
         }
 
         ~Awaiter() noexcept {
-            current_executor->decrement_work();
+            if (cv) {
+                current_executor->decrement_work();
+            }
         }
 
         ConditionalVariable* cv;
     };
 
-    std::atomic<std::weak_ptr<TaskStack>> continuation;
+    std::deque<std::weak_ptr<TaskStack>> continuations;
+    std::mutex mutex;
 };
 
 struct Error : std::exception {};
@@ -530,6 +573,7 @@ public:
     }
 };
 
+/// Awaiting connects to the running task
 template <class T>
 struct JoinHandle {
     struct promise_type
@@ -727,8 +771,9 @@ class ThisThreadExecutor final : public Executor {
 public:
     ThisThreadExecutor() = default;
 
-    template <class T>
-    T block_on(Task<T> task) noexcept(false) {
+    auto block_on(Awaitable auto task) noexcept(false) {
+        using T = decltype(task.await_resume());
+
         current_executor = this;
 
         struct Stack {
@@ -855,8 +900,9 @@ private:
 class ThreadPoolExecutor : public Executor {
 public:
     /// \post reentrant
-    template <class T>
-    T block_on(Task<T> task) noexcept(false) {
+    auto block_on(Awaitable auto task) noexcept(false) {
+        using T = decltype(task.await_resume());
+
         current_executor = this;
 
         struct Stack {
@@ -1028,6 +1074,7 @@ public:
 
     template <class T>
     void await_suspend(std::coroutine_handle<T> caller) {
+        // todo: use `current_executor`?
         auto caller_stack = caller.promise().stack.lock();
         alonite_assert(caller_stack, Invariant{});
         caller_stack->erased_top().ex->spawn(
@@ -1578,9 +1625,10 @@ private:
     std::vector<std::weak_ptr<TaskStack>> stacks;
 };
 
-template <class T>
-inline JoinHandle<T> spawn(Task<T>&& task) noexcept(false) {
-    auto t = [](Task<T> task) -> JoinHandle<T> {
+inline auto spawn(Awaitable auto&& task) noexcept(false)
+        -> JoinHandle<decltype(task.await_resume())> {
+    using T = decltype(task.await_resume());
+    auto t = [](auto task) -> JoinHandle<T> {
         co_return co_await task;
     }(std::move(task));
     return t;

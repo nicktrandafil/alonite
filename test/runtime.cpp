@@ -2,8 +2,11 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <string_view>
+
 using namespace alonite;
 using namespace std::chrono_literals;
+using namespace std::string_view_literals;
 using namespace std::chrono;
 
 TEST_CASE("value result", "[ThisThreadExecutor::block_on]") {
@@ -241,9 +244,108 @@ TEST_CASE(
         }(&counter, &cv));
 
         co_await Sleep{5ms};
-        cv.notify();
+        cv.notify_one();
     }());
     REQUIRE(counter == 2);
+}
+
+TEST_CASE(
+        "spawn two tasks and wait on cv in it, then after 5ms notify one of them, then "
+        "after 5ms the other",
+        "[ConditionalVariable]") {
+    ThisThreadExecutor executor;
+    std::vector<std::string_view> events;
+    executor.block_on([&]() -> Task<void> {
+        ConditionalVariable cv;
+
+        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+            auto const start = steady_clock::now();
+
+            co_await cv->wait();
+
+            auto const elapsed = steady_clock::now() - start;
+
+            events.push_back("task 1 awakened");
+
+            REQUIRE(5ms < elapsed);
+#ifdef NDEBUG
+            REQUIRE(elapsed < 6ms);
+#endif
+
+            co_return;
+        }(events, &cv));
+
+        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+            auto const start = steady_clock::now();
+
+            co_await cv->wait();
+
+            auto const elapsed = steady_clock::now() - start;
+
+            events.push_back("task 2 awakened");
+
+            REQUIRE(10ms < elapsed);
+#ifdef NDEBUG
+            REQUIRE(elapsed < 11ms);
+#endif
+
+            co_return;
+        }(events, &cv));
+
+        co_await Sleep{5ms};
+        cv.notify_one();
+
+        co_await Sleep{5ms};
+        cv.notify_one();
+    }());
+    REQUIRE(events == (std::vector{"task 1 awakened"sv, "task 2 awakened"sv}));
+}
+
+TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of them",
+          "[ConditionalVariable]") {
+    ThisThreadExecutor executor;
+    std::vector<std::string_view> events;
+    executor.block_on([&]() -> Task<void> {
+        ConditionalVariable cv;
+
+        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+            auto const start = steady_clock::now();
+
+            co_await cv->wait();
+
+            auto const elapsed = steady_clock::now() - start;
+
+            events.push_back("task 1 awakened");
+
+            REQUIRE(5ms < elapsed);
+#ifdef NDEBUG
+            REQUIRE(elapsed < 6ms);
+#endif
+
+            co_return;
+        }(events, &cv));
+
+        spawn([](auto& events, ConditionalVariable* cv) -> Task<void> {
+            auto const start = steady_clock::now();
+
+            co_await cv->wait();
+
+            auto const elapsed = steady_clock::now() - start;
+
+            events.push_back("task 2 awakened");
+
+            REQUIRE(5ms < elapsed);
+#ifdef NDEBUG
+            REQUIRE(elapsed < 6ms);
+#endif
+
+            co_return;
+        }(events, &cv));
+
+        co_await Sleep{5ms};
+        cv.notify_all();
+    }());
+    REQUIRE(events == (std::vector{"task 1 awakened"sv, "task 2 awakened"sv}));
 }
 
 TEST_CASE("the coroutine is on time", "[Timeout]") {

@@ -17,7 +17,7 @@ public:
     /// \throw std::bad_alloc
     void push(T value) noexcept(false) {
         queue.push_back(std::move(value));
-        cv.notify();
+        cv.notify_one();
     }
 
     Task<std::optional<T>> pop() noexcept {
