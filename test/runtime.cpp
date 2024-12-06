@@ -44,25 +44,24 @@ TEST_CASE("void result", "[ThisThreadExecutor::block_on]") {
 TEST_CASE("destruction order should be natural", "[ThisThreadExecutor::block_on]") {
     ThisThreadExecutor executor;
 
-    int acc = 0;
+    std::vector<std::string_view> events;
 
     struct Add {
-        [[maybe_unused]] ~Add() noexcept {
-            acc *= 2;
-            acc += x;
+        [[maybe_unused]] ~Add() {
+            events.push_back(x);
         }
 
-        int& acc;
-        int x;
+        std::vector<std::string_view>& events;
+        std::string_view x;
     };
 
     executor.block_on([&](std::shared_ptr<Add>) -> Task<void> {
         co_await [&](std::shared_ptr<Add>) -> Task<void> {
             co_return;
-        }(std::shared_ptr<Add>(new Add{acc, 2}));
-    }(std::shared_ptr<Add>(new Add{acc, 1})));
+        }(std::shared_ptr<Add>(new Add{events, "x"}));
+    }(std::shared_ptr<Add>(new Add{events, "y"})));
 
-    REQUIRE(acc == 5);
+    REQUIRE(events == (std::vector{"x"sv, "y"sv}));
 }
 
 TEST_CASE("await for result", "[spawn]") {
@@ -833,4 +832,3 @@ TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
 
     REQUIRE(elapsed >= 10ms);
 }
-ConditionVariable
