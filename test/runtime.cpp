@@ -87,6 +87,15 @@ TEST_CASE("ignore result", "[Sleep]") {
     REQUIRE(end - start < 10ms);
 }
 
+TEST_CASE("should set result", "[Sleep]") {
+    ThisThreadExecutor executor;
+    auto const start = steady_clock::now();
+    executor.block_on(Sleep{5ms});
+    auto const end = steady_clock::now();
+    REQUIRE(5ms <= end - start);
+    REQUIRE(end - start < 10ms);
+}
+
 TEST_CASE("ignore result", "[spawn]") {
     ThisThreadExecutor executor;
     bool run = false;
@@ -831,4 +840,105 @@ TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
     t.join();
 
     REQUIRE(elapsed >= 10ms);
+}
+
+TEST_CASE("change executor and yield", "[WithExecutor]") {
+    ThisThreadExecutor exec;
+    ThreadPoolExecutor pool_exec;
+
+    ConditionVariable cv;
+
+    std::thread t1{[&] {
+        pool_exec.block_on([](auto& cv) -> Task<void> {
+            cv.notify_one();
+            co_await cv.wait();
+        }(cv));
+    }};
+
+    ThisThreadExecutor{}.block_on(cv.wait());
+
+    ALONITE_SCOPE_EXIT {
+        t1.join();
+    };
+
+    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+        co_await WithExecutor{&ex, Yield{}};
+        cv.notify_all();
+    }(pool_exec, cv));
+}
+
+TEST_CASE("change executor and sleep", "[WithExecutor]") {
+    ThisThreadExecutor exec;
+    ThreadPoolExecutor pool_exec;
+
+    ConditionVariable cv;
+
+    std::thread t1{[&] {
+        pool_exec.block_on([](auto& cv) -> Task<void> {
+            cv.notify_one();
+            co_await cv.wait();
+        }(cv));
+    }};
+
+    ThisThreadExecutor{}.block_on(cv.wait());
+
+    ALONITE_SCOPE_EXIT {
+        t1.join();
+    };
+
+    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+        co_await WithExecutor{&ex, Sleep{10ms}};
+        cv.notify_all();
+    }(pool_exec, cv));
+}
+
+TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
+    ThisThreadExecutor exec;
+    ThreadPoolExecutor pool_exec;
+
+    ConditionVariable cv;
+
+    std::thread t1{[&] {
+        pool_exec.block_on([](auto& cv) -> Task<void> {
+            cv.notify_one();
+            co_await cv.wait();
+        }(cv));
+    }};
+
+    ThisThreadExecutor{}.block_on(cv.wait());
+
+    std::thread t2{[&] {
+        pool_exec.block_on(Yield{});
+    }};
+
+    std::thread t3{[&] {
+        pool_exec.block_on(Yield{});
+    }};
+
+    ALONITE_SCOPE_EXIT {
+        t1.join();
+        t2.join();
+        t3.join();
+    };
+
+    auto const start = steady_clock::now();
+
+    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+        co_await WithExecutor{&ex, []() -> Task<void> {
+                                  co_await WhenAll{[]() -> Task<void> {
+                                                       std::this_thread::sleep_for(100ms);
+                                                       co_return;
+                                                   }(),
+                                                   []() -> Task<void> {
+                                                       std::this_thread::sleep_for(100ms);
+                                                       co_return;
+                                                   }()};
+                              }()};
+        cv.notify_all();
+        co_return;
+    }(pool_exec, cv));
+
+    auto const elapsed = steady_clock::now() - start;
+    REQUIRE(100ms <= elapsed);
+    REQUIRE(elapsed < 110ms);
 }

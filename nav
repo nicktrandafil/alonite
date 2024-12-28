@@ -1,0 +1,23 @@
+echo "Initialize Debug" \
+&& mkdir -p build/Debug \
+&& cmake -S . -B build/Debug -GNinja -DCMAKE_BUILD_TYPE=Debug
+
+echo "Initialize Debug" \
+&& mkdir -p build/Debug \
+&& cmake -S . -B build/Debug -DCMAKE_BUILD_TYPE=Debug
+
+echo "Build Debug and run" \
+&& cmake --build build/Debug -t test_alonite \
+&& echo "Test" \
+&& ./build/Debug/test_alonite
+
+git diff HEAD --name-only | grep -E '\.(h$)|(hpp$)|(cpp$)' | xargs clang-format -i
+
+echo "Initialize Release" \
+&& mkdir -p build/Release \
+&& cmake -S . -B build/Release -GNinja
+
+echo "Build Release and run" \
+&& cmake --build build/Release -t test_alonite \
+&& echo "Test" \
+&& ./build/Release/test_alonite

@@ -87,8 +87,8 @@ struct Executor {
             unsigned id,
             std::vector<std::shared_ptr<TaskStack>> x) noexcept(false) = 0;
     virtual bool remove_guard_group(unsigned id) noexcept = 0;
-    virtual void increment_work() = 0;
-    virtual void decrement_work() = 0;
+    virtual void increment_external_work() = 0;
+    virtual void decrement_external_work() = 0;
     virtual ~Executor() = default;
 };
 
@@ -214,6 +214,10 @@ public:
 
     size_t size() const noexcept {
         return frames.size();
+    }
+
+    bool empty() const noexcept {
+        return frames.empty();
     }
 
     ~TaskStack() noexcept {
@@ -397,8 +401,9 @@ public:
         alonite_assert(stack, Invariant{});
         alonite_assert(co, Invariant{});
         stack->push(TaskStack::ErasedFrame{
-                .co = co, .ex = current_executor}); // Current coroutine is suspended, so
-                                                    // it is safe to modify the stack
+                .co = co,
+                .ex = stack->erased_top().ex}); // Current coroutine is suspended, so
+                                                // it is safe to modify the stack
         co.promise().stack = stack;
         return co;
     }
@@ -500,14 +505,14 @@ private:
 
         template <class U>
         void await_suspend(std::coroutine_handle<U> continuation) noexcept {
-            current_executor->increment_work();
+            current_executor->increment_external_work();
             std::lock_guard lock{cv->mutex};
             cv->continuations.push_back(continuation.promise().stack);
         }
 
         ~Awaiter() noexcept {
             if (cv) {
-                current_executor->decrement_work();
+                current_executor->decrement_external_work();
             }
         }
 
@@ -575,7 +580,7 @@ public:
 
 /// Awaiting connects to the running task
 template <class T>
-struct JoinHandle {
+struct JoinHandle { // todo: make class
     struct promise_type
             : BasePromise
             , CreateStack<promise_type, JoinHandle>
@@ -809,7 +814,7 @@ public:
             };
         };
 
-        auto t = [&](auto task) -> Stack {
+        auto t = [](auto task) -> Stack {
             co_return co_await task;
         }(std::move(task));
 
@@ -834,7 +839,7 @@ public:
                 }
             } while (!tasks.empty());
 
-            if (delayed_tasks.empty() && work == 0) {
+            if (delayed_tasks.empty() && external_work == 0) {
                 break;
             }
 
@@ -880,12 +885,12 @@ private:
         delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
     }
 
-    void increment_work() override {
-        ++work;
+    void increment_external_work() override {
+        ++external_work;
     }
 
-    void decrement_work() override {
-        --work;
+    void decrement_external_work() override {
+        --external_work;
     }
 
     std::vector<Work> tasks;
@@ -894,7 +899,7 @@ private:
             spawned_tasks;
     std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
             spawned_task_groups;
-    size_t work{0};
+    size_t external_work{0};
 };
 
 class ThreadPoolExecutor : public Executor {
@@ -938,7 +943,7 @@ public:
             };
         };
 
-        auto t = [&](auto task) -> Stack {
+        auto t = [](auto task) -> Stack {
             co_return co_await task;
         }(std::move(task));
 
@@ -983,7 +988,7 @@ public:
                 } while (!tasks2.empty());
 
                 std::unique_lock lock{mutex};
-                if (work.load(std::memory_order_relaxed) == 0 && tasks.empty()
+                if (external_work.load(std::memory_order_relaxed) == 0 && tasks.empty()
                     && delayed_tasks.empty()) {
                     break;
                 } else if (!delayed_tasks.empty()) {
@@ -1041,12 +1046,12 @@ public:
         cv.notify_one();
     }
 
-    void increment_work() override {
-        work.fetch_add(1, std::memory_order_relaxed);
+    void increment_external_work() override {
+        external_work.fetch_add(1, std::memory_order_relaxed);
     }
 
-    void decrement_work() override {
-        work.fetch_sub(1, std::memory_order_relaxed);
+    void decrement_external_work() override {
+        external_work.fetch_sub(1, std::memory_order_relaxed);
     }
 
 private:
@@ -1058,7 +1063,7 @@ private:
             spawned_tasks;
     std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
             spawned_task_groups;
-    std::atomic<size_t> work{0};
+    std::atomic<size_t> external_work{0};
     std::atomic<unsigned> active_threads{0};
 };
 
@@ -1074,7 +1079,6 @@ public:
 
     template <class T>
     void await_suspend(std::coroutine_handle<T> caller) {
-        // todo: use `current_executor`?
         auto caller_stack = caller.promise().stack.lock();
         alonite_assert(caller_stack, Invariant{});
         caller_stack->erased_top().ex->spawn(
@@ -1200,11 +1204,11 @@ private:
     static void cancel_and_continue(std::weak_ptr<TaskStack>&& stack,
                                     std::weak_ptr<TaskStack>&& continuation) {
         if (stack.lock()) {
-            current_executor->spawn(
-                    Work{[stack = std::move(stack),
-                          continuation = std::move(continuation)]() mutable {
+            current_executor->spawn(Work{
+                    [stack, continuation = std::move(continuation)]() mutable {
                         cancel_and_continue(std::move(stack), std::move(continuation));
-                    }});
+                    },
+                    std::move(stack)});
         } else if (auto x = continuation.lock();
                    x
                    && !schedule_on_other_ex(
@@ -1479,7 +1483,8 @@ public:
     }
 
     template <class U>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) noexcept(
+            false) {
         continuation = caller.promise().stack;
 
         {
@@ -1571,7 +1576,8 @@ public:
     }
 
     template <class U>
-    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) noexcept(
+            false) {
         continuation = caller.promise().stack;
 
         if (auto const x = continuation.lock()) {
@@ -1641,16 +1647,114 @@ public:
     }
 
     template <class T>
-    void await_suspend(std::coroutine_handle<T> caller) noexcept {
-        current_executor->spawn(Work{[continuation = caller.promise().stack]() mutable {
-            if (auto const x = continuation.lock()) {
-                x->erased_top().co.resume();
-            }
-        }});
+    void await_suspend(std::coroutine_handle<T> caller) noexcept(false) {
+        current_executor->spawn(Work{[continuation = caller.promise().stack] {
+                                         if (auto const x = continuation.lock()) {
+                                             x->erased_top().co.resume();
+                                         }
+                                     },
+                                     std::weak_ptr{caller.promise().stack}});
     }
 
     void await_resume() const noexcept {
     }
+};
+
+template <Awaitable A>
+class WithExecutor {
+    using R = decltype(std::declval<A>().await_resume());
+
+    struct Stack {
+        struct promise_type
+                : BasePromise
+                , std::conditional_t<std::is_void_v<R>,
+                                     ReturnVoid<promise_type>,
+                                     ReturnValue<promise_type>> {
+            using ValueType = R;
+
+#if defined(__clang__)
+            promise_type(A const&, std::weak_ptr<TaskStack> x, Executor* ex)
+                    : BasePromise{std::move(x)}
+                    , ex{ex} {
+            }
+#else
+            template <class Z>
+            promise_type(Z const&, A const&, std::weak_ptr<TaskStack> x, Executor* ex)
+                    : BasePromise{std::move(x)}
+                    , ex{ex} {
+            }
+#endif
+
+            promise_type(promise_type const&) = delete;
+            promise_type& operator=(promise_type const&) = delete;
+            promise_type(promise_type&&) = delete;
+            promise_type& operator=(promise_type&&) = delete;
+
+            Stack get_return_object() noexcept {
+                auto const stack = this->stack.lock();
+                auto const co = std::coroutine_handle<promise_type>::from_promise(*this);
+                alonite_assert(stack, Invariant{}, "`caller` can't be dead and await us");
+                stack->push(TaskStack::ErasedFrame{.co = co, .ex = ex});
+                return Stack{};
+            }
+
+            std::suspend_always initial_suspend() const noexcept {
+                return {};
+            }
+
+            auto final_suspend() const noexcept {
+                auto stack = this->stack.lock();
+                alonite_assert(stack, Invariant{});
+                stack->pop();
+                return FinalAwaiter{std::move(stack)};
+            }
+
+            Executor* ex;
+        };
+    };
+
+public:
+    explicit WithExecutor(Executor* ex, A&& aw) noexcept
+            : ex{ex}
+            , aw{std::move(aw)} {
+    }
+
+    ~WithExecutor() noexcept {
+        // todo: should I use erased_top in case some other executor destroys us?
+        // It might be possible, if there is timout in upstream on a different executor.
+        // Write a test.
+        current_executor->decrement_external_work();
+    }
+
+    bool await_ready() const noexcept {
+        return false;
+    }
+
+    template <class U>
+    void await_suspend(std::coroutine_handle<U> caller) noexcept(false) {
+        // todo: should I use erased_top?
+        current_executor->increment_external_work();
+        this->stack = caller.promise().stack;
+        auto stack = caller.promise().stack.lock();
+        alonite_assert(stack, Invariant{}, "`caller` can't be dead and await us");
+        [](auto aw, auto const&, auto const&) -> Stack {
+            co_return co_await aw;
+        }(std::move(aw).value(), *this->stack, ex);
+        schedule(std::move(stack));
+    }
+
+    R await_resume() noexcept {
+        std::optional<std::weak_ptr<TaskStack>> tmp;
+        std::swap(tmp, stack);
+        auto stack = tmp.value().lock();
+        alonite_assert(stack, Invariant{});
+        return stack->template take_result<R>();
+    }
+
+private:
+    Executor* ex;
+    std::optional<A> aw;
+    std::optional<std::weak_ptr<TaskStack>> stack;
 };
 
 } // namespace alonite

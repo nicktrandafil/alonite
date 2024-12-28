@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.30)
 
 project(alonite VERSION 0.1 LANGUAGES CXX)
 
@@ -36,7 +36,7 @@ set_target_build_settings(test_alonite WARNINGS_ARE_ERRORS ${alonite_WARNINGS_AR
 add_executable(bench_alonite
     bench/runtime.cpp
 )
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(Boost CONFIG REQUIRED COMPONENTS system)
 target_link_libraries(bench_alonite PRIVATE alonite Boost::boost Boost::system)
 set_target_build_settings(bench_alonite WARNINGS_ARE_ERRORS ${alonite_WARNINGS_ARE_ERRORS})
 
