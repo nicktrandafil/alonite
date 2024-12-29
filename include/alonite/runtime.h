@@ -44,6 +44,13 @@ constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
 }
 
+template <class T>
+std::optional<T> take(std::optional<T>& x) {
+    std::optional<T> ret;
+    ret.swap(x);
+    return ret;
+}
+
 class TaskStack;
 
 class Work {
@@ -1719,11 +1726,8 @@ public:
             , aw{std::move(aw)} {
     }
 
-    ~WithExecutor() noexcept {
-        // todo: should I use erased_top in case some other executor destroys us?
-        // It might be possible, if there is timout in upstream on a different executor.
-        // Write a test.
-        current_executor->decrement_external_work();
+    ~WithExecutor() {
+        take(prev_ex).value()->decrement_external_work();
     }
 
     bool await_ready() const noexcept {
@@ -1732,21 +1736,22 @@ public:
 
     template <class U>
     void await_suspend(std::coroutine_handle<U> caller) noexcept(false) {
-        // todo: should I use erased_top?
-        current_executor->increment_external_work();
-        this->stack = caller.promise().stack;
-        auto stack = caller.promise().stack.lock();
+        stack = caller.promise().stack;
+        auto stack = this->stack->lock();
         alonite_assert(stack, Invariant{}, "`caller` can't be dead and await us");
+
+        prev_ex = stack->erased_top().ex;
+        (*prev_ex)->increment_external_work();
+
         [](auto aw, auto const&, auto const&) -> Stack {
             co_return co_await aw;
         }(std::move(aw).value(), *this->stack, ex);
+
         schedule(std::move(stack));
     }
 
     R await_resume() noexcept {
-        std::optional<std::weak_ptr<TaskStack>> tmp;
-        std::swap(tmp, stack);
-        auto stack = tmp.value().lock();
+        auto stack = take(this->stack).value().lock();
         alonite_assert(stack, Invariant{});
         return stack->template take_result<R>();
     }
@@ -1755,6 +1760,7 @@ private:
     Executor* ex;
     std::optional<A> aw;
     std::optional<std::weak_ptr<TaskStack>> stack;
+    std::optional<Executor*> prev_ex;
 };
 
 } // namespace alonite
