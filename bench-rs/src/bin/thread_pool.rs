@@ -110,7 +110,7 @@ async fn main() {
         println!("rust coro - fib(30)");
 
         let ts = std::time::Instant::now();
-        println!("fib(30)={}", fib(34).await);
+        println!("fib(30)={}", fib(30).await);
         println!("{}ms", ts.elapsed().as_millis());
     }
 }
