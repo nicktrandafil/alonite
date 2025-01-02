@@ -484,7 +484,7 @@ public:
     }
 
 private:
-    struct Awaiter {
+    struct [[nodiscard]] Awaiter {
         Awaiter(ConditionVariable* cv) noexcept
                 : cv{cv} {
         }
@@ -1105,10 +1105,12 @@ private:
     std::chrono::milliseconds dur;
 };
 
-template <class TaskT /*Coroutine Concept*/>
+template <Awaitable A>
 class Timeout {
+    using T = decltype(std::declval<A>().await_resume());
+
 public:
-    explicit Timeout(std::chrono::milliseconds duration, TaskT&& task) noexcept
+    explicit Timeout(std::chrono::milliseconds duration, A&& task) noexcept
             : dur{duration}
             , task{std::move(task)} {
     }
@@ -1119,8 +1121,6 @@ public:
 
     template <class U>
     std::coroutine_handle<> await_suspend(std::coroutine_handle<U> caller) {
-        using T = typename TaskT::promise_type::ValueType;
-
         struct Stack {
             struct promise_type
                     : BasePromise
@@ -1180,7 +1180,7 @@ public:
 
         auto task_wrapper = [](auto task) -> Stack {
             co_return co_await task;
-        }(std::move(task));
+        }(take(task).value());
         this->stack = task_wrapper.stack;
         task_wrapper.co.promise().continuation = caller.promise().stack;
         current_executor->add_guard(std::shared_ptr{task_wrapper.stack});
@@ -1199,12 +1199,12 @@ public:
         return task_wrapper.co;
     }
 
-    typename TaskT::promise_type::ValueType await_resume() noexcept(false) {
+    T await_resume() noexcept(false) {
         auto const stack = this->stack.lock();
         if (!stack) {
             throw TimedOut{};
         }
-        return stack->template take_result<typename TaskT::promise_type::ValueType>();
+        return stack->template take_result<T>();
     }
 
 private:
@@ -1226,7 +1226,7 @@ private:
 
 private:
     std::chrono::milliseconds dur;
-    TaskT task;
+    std::optional<A> task;
     std::weak_ptr<TaskStack> stack;
 };
 
@@ -1724,10 +1724,19 @@ public:
     explicit WithExecutor(Executor* ex, A&& aw) noexcept
             : ex{ex}
             , aw{std::move(aw)} {
+        alonite_assert(ex != nullptr, Invariant{});
     }
 
+    WithExecutor(WithExecutor const&) = delete;
+    WithExecutor& operator=(WithExecutor const&) = delete;
+
+    WithExecutor(WithExecutor&&) = default;
+    WithExecutor& operator=(WithExecutor&&) = default;
+
     ~WithExecutor() {
-        take(prev_ex).value()->decrement_external_work();
+        if (auto const ex = take(prev_ex)) {
+            (*ex)->decrement_external_work();
+        }
     }
 
     bool await_ready() const noexcept {

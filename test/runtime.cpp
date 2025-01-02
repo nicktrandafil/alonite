@@ -942,3 +942,41 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
     REQUIRE(100ms <= elapsed);
     REQUIRE(elapsed < 110ms);
 }
+
+TEST_CASE(
+        "a timeout on a different executor on upstream cancels the coroutine and "
+        "decrements external work on the correct executor",
+        "[WithExecutor]") {
+    ThisThreadExecutor exec;
+
+    exec.block_on([&exec]() -> Task<void> {
+        ThreadPoolExecutor pool_exec;
+        ConditionVariable cv;
+
+        std::thread t1{[&] {
+            pool_exec.block_on([](auto& cv) -> Task<void> {
+                cv.notify_one();
+                co_await cv.wait();
+            }(cv));
+        }};
+
+        co_await cv.wait();
+
+        std::thread t2{[&] {
+            pool_exec.block_on(Yield{});
+        }};
+
+        ALONITE_SCOPE_EXIT {
+            t1.join();
+            t2.join();
+        };
+
+        try {
+            co_await Timeout{10ms,
+                             WithExecutor{&pool_exec, WithExecutor{&exec, Sleep{20ms}}}};
+        } catch (TimedOut const&) {
+        }
+
+        cv.notify_all();
+    }());
+}
