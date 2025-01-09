@@ -356,6 +356,43 @@ TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of t
     REQUIRE(events == (std::vector{"task 1 awakened"sv, "task 2 awakened"sv}));
 }
 
+TEST_CASE(
+        "a timeout on a different executor on upstream cancels the coroutine and "
+        "decrements external work on the correct executor",
+        "[ConditionVariable]") {
+    ThisThreadExecutor exec;
+
+    exec.block_on([&exec]() -> Task<void> {
+        ThreadPoolExecutor pool_exec;
+        ConditionVariable cv;
+
+        std::thread t1{[&] {
+            pool_exec.block_on([](auto& cv) -> Task<void> {
+                cv.notify_one();
+                co_await cv.wait();
+            }(cv));
+        }};
+
+        co_await cv.wait();
+
+        std::thread t2{[&] {
+            pool_exec.block_on(Yield{});
+        }};
+
+        ALONITE_SCOPE_EXIT {
+            t1.join();
+            t2.join();
+        };
+
+        try {
+            co_await Timeout{10ms, WithExecutor{&pool_exec, cv.wait()}};
+        } catch (TimedOut const&) {
+        }
+
+        cv.notify_all();
+    }());
+}
+
 TEST_CASE("the coroutine is on time", "[Timeout]") {
     ThisThreadExecutor executor;
     int counter = 0;
@@ -972,8 +1009,13 @@ TEST_CASE(
         };
 
         try {
-            co_await Timeout{10ms,
-                             WithExecutor{&pool_exec, WithExecutor{&exec, Sleep{20ms}}}};
+            co_await Timeout{
+                    10ms,
+                    WithExecutor{&pool_exec,
+                                 /*this adds external work on `pool_exec`; it needs
+                                    subtract the external work from `pool_exec`, even
+                                    though it is `exec` who destroys the stack*/
+                                 WithExecutor{&exec, Sleep{20ms}}}};
         } catch (TimedOut const&) {
         }
 

@@ -283,17 +283,16 @@ inline void schedule(std::shared_ptr<TaskStack>&& stack) {
 }
 
 /// \post will not move if the `stack` is not scheduled
-inline bool schedule_on_other_ex(std::shared_ptr<TaskStack>&& stack) {
+inline bool schedule_if_not(std::shared_ptr<TaskStack>&& stack, Executor* ex) {
     alonite_assert(stack, Invariant{});
-    return stack->erased_top().ex != current_executor
-        && (schedule(std::move(stack)), true);
+    return stack->erased_top().ex != ex && (schedule(std::move(stack)), true);
 }
 
 struct FinalAwaiter {
     std::shared_ptr<TaskStack> stack;
 
     bool await_ready() noexcept {
-        return schedule_on_other_ex(std::move(stack));
+        return schedule_if_not(std::move(stack), current_executor);
     }
 
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> co) noexcept {
@@ -455,7 +454,7 @@ public:
                 }
                 return ret;
             }()) {
-            if (!schedule_on_other_ex(std::move(*c))) {
+            if (!schedule_if_not(std::move(*c), current_executor)) {
                 (*c)->erased_top().co.resume();
             }
             return true;
@@ -473,7 +472,8 @@ public:
                  std::swap(ret, continuations);
                  return ret;
              }()) {
-            if (auto x = c.lock(); x && !schedule_on_other_ex(std::move(x))) {
+            if (auto x = c.lock();
+                x && !schedule_if_not(std::move(x), current_executor)) {
                 x->erased_top().co.resume();
             }
         }
@@ -512,18 +512,20 @@ private:
 
         template <class U>
         void await_suspend(std::coroutine_handle<U> continuation) noexcept {
-            current_executor->increment_external_work();
+            ex = current_executor;
+            (*ex)->increment_external_work();
             std::lock_guard lock{cv->mutex};
             cv->continuations.push_back(continuation.promise().stack);
         }
 
         ~Awaiter() noexcept {
             if (cv) {
-                current_executor->decrement_external_work();
+                ex.value()->decrement_external_work();
             }
         }
 
         ConditionVariable* cv;
+        std::optional<Executor*> ex;
     };
 
     std::deque<std::weak_ptr<TaskStack>> continuations;
@@ -616,7 +618,7 @@ struct JoinHandle { // todo: make class
                 bool await_ready() noexcept {
                     return !continuation.has_value()
                         || /* we need to suspend only to continue on other executor*/
-                           schedule_on_other_ex(std::move(*continuation));
+                           schedule_if_not(std::move(*continuation), current_executor);
                 }
 
                 std::coroutine_handle<> await_suspend(
@@ -1144,7 +1146,8 @@ public:
                             return /* we need to suspend only to continue on other
                                       executor*/
                                     !continuation.has_value()
-                                    || schedule_on_other_ex(std::move(*continuation));
+                                    || schedule_if_not(std::move(*continuation),
+                                                       current_executor);
                         }
 
                         std::coroutine_handle<> await_suspend(
@@ -1218,8 +1221,9 @@ private:
                     std::move(stack)});
         } else if (auto x = continuation.lock();
                    x
-                   && !schedule_on_other_ex(
-                           /*not moved if not scheduled*/ std::move(x))) {
+                   && !schedule_if_not(
+                           /*not moved if not scheduled*/ std::move(x),
+                           current_executor)) {
             x->erased_top().co.resume();
         }
     }
@@ -1256,7 +1260,7 @@ struct WhenAllStack {
                                    < (*continuation)->tasks_to_complete) {
                         return true;
                     }
-                    return schedule_on_other_ex(std::move(*continuation));
+                    return schedule_if_not(std::move(*continuation), current_executor);
                 }
 
                 std::coroutine_handle<> await_suspend(
@@ -1437,7 +1441,8 @@ struct WhenAnyStack {
                 bool await_ready() noexcept {
                     if (continuation.has_value()) {
                         (*continuation)->completed_task_index = index;
-                        return schedule_on_other_ex(std::move(*continuation));
+                        return schedule_if_not(std::move(*continuation),
+                                               current_executor);
                     }
                     return true;
                 }
