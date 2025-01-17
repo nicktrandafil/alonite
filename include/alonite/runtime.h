@@ -34,11 +34,17 @@
 namespace alonite {
 
 template <class T>
-concept Awaitable = requires(T x) {
+concept AwaitableC = requires(T x) {
     { x.await_ready() } -> std::convertible_to<bool>;
     x.await_suspend(std::declval<std::coroutine_handle<>>());
     x.await_resume();
 };
+
+template <class T>
+concept CoroC = requires { T::promise_type; };
+
+template <class T>
+concept TaskC = AwaitableC<T> && CoroC<T>;
 
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
@@ -288,7 +294,7 @@ inline bool schedule_if_not(std::shared_ptr<TaskStack>&& stack, Executor* ex) {
     return stack->erased_top().ex != ex && (schedule(std::move(stack)), true);
 }
 
-struct FinalAwaiter {
+struct [[nodiscard]] FinalAwaiter {
     std::shared_ptr<TaskStack> stack;
 
     bool await_ready() noexcept {
@@ -308,7 +314,7 @@ struct FinalAwaiter {
 };
 
 struct BasePromise {
-    std::weak_ptr<TaskStack> stack; // todo: implement own weak ptr
+    std::weak_ptr<TaskStack> stack;
 
     void unhandled_exception() {
         auto const stack = this->stack.lock();
@@ -340,7 +346,7 @@ struct ReturnVoid {
     }
 };
 
-template <class PromiseT, class Stack /*Coroutine Concept*/>
+template <class PromiseT, class Stack>
 struct CreateStack {
     Stack get_return_object() noexcept(false) {
         auto const self = static_cast<PromiseT*>(this);
@@ -354,7 +360,7 @@ struct CreateStack {
 };
 
 template <class T>
-class Task {
+class [[nodiscard]] Task {
 public:
     Task() = delete;
 
@@ -612,7 +618,7 @@ struct JoinHandle { // todo: make class
         }
 
         auto final_suspend() const noexcept {
-            struct Awaiter {
+            struct [[nodiscard]] Awaiter {
                 std::optional<std::shared_ptr<TaskStack>> continuation;
 
                 bool await_ready() noexcept {
@@ -785,7 +791,7 @@ class ThisThreadExecutor final : public Executor {
 public:
     ThisThreadExecutor() = default;
 
-    auto block_on(Awaitable auto task) noexcept(false) {
+    auto block_on(AwaitableC auto task) noexcept(false) {
         using T = decltype(task.await_resume());
 
         current_executor = this;
@@ -914,7 +920,7 @@ private:
 class ThreadPoolExecutor : public Executor {
 public:
     /// \post reentrant
-    auto block_on(Awaitable auto task) noexcept(false) {
+    auto block_on(AwaitableC auto task) noexcept(false) {
         using T = decltype(task.await_resume());
 
         current_executor = this;
@@ -1076,7 +1082,7 @@ private:
     std::atomic<unsigned> active_threads{0};
 };
 
-class Sleep {
+class [[nodiscard]] Sleep {
 public:
     explicit Sleep(std::chrono::milliseconds dur) noexcept
             : dur{dur} {
@@ -1107,8 +1113,8 @@ private:
     std::chrono::milliseconds dur;
 };
 
-template <Awaitable A>
-class Timeout {
+template <AwaitableC A>
+class [[nodiscard]] Timeout {
     using T = decltype(std::declval<A>().await_resume());
 
 public:
@@ -1139,7 +1145,7 @@ public:
                 }
 
                 auto final_suspend() const noexcept {
-                    struct Awaiter {
+                    struct [[nodiscard]] Awaiter {
                         std::optional<std::shared_ptr<TaskStack>> continuation;
 
                         bool await_ready() noexcept {
@@ -1251,7 +1257,7 @@ struct WhenAllStack {
         }
 
         auto final_suspend() noexcept {
-            struct Awaiter {
+            struct [[nodiscard]] Awaiter {
                 std::optional<std::shared_ptr<TaskStack>> continuation;
 
                 bool await_ready() noexcept {
@@ -1290,8 +1296,8 @@ struct WhenAllStack {
             co; // todo:? is available as first frame in the stack
 };
 
-template <class... TaskT /*Coroutine Concept*/>
-class WhenAll {
+template <AwaitableC... TaskT>
+class [[nodiscard]] WhenAll {
 public:
     static_assert(sizeof...(TaskT) > 0);
 
@@ -1316,8 +1322,7 @@ public:
         auto task_wrappers = std::apply(
                 []<typename... X>(X&&... task) {
                     return std::tuple{
-                            [](auto task)
-                                    -> WhenAllStack<typename X::promise_type::ValueType> {
+                            [](auto task) -> WhenAllStack<decltype(task.await_resume())> {
                                 co_return co_await task;
                             }(std::move(task))...};
                 },
@@ -1344,12 +1349,13 @@ public:
                 std::move(task_wrappers));
     }
 
-    std::tuple<typename Void<typename TaskT::promise_type::ValueType>::WrapperT...>
+    std::tuple<typename Void<decltype(std::declval<TaskT>().await_resume())>::WrapperT...>
     await_resume() noexcept(false) {
         return [this]<size_t... Is>(std::index_sequence<Is...>) {
-            return std::tuple{
-                    Void<typename std::tuple_element_t<Is, std::tuple<TaskT...>>::
-                                 promise_type::ValueType>::take(*stacks[Is])...};
+            return std::tuple{Void<
+                    decltype(std::declval<
+                                     std::tuple_element_t<Is, std::tuple<TaskT...>>>()
+                                     .await_resume())>::take(*stacks[Is])...};
         }(std::make_index_sequence<sizeof...(TaskT)>());
     }
 
@@ -1358,8 +1364,8 @@ private:
     std::array<std::shared_ptr<TaskStack>, sizeof...(TaskT)> stacks;
 };
 
-template <class TaskT /*Coroutine Concept*/>
-class WhenAllDyn {
+template <AwaitableC TaskT>
+class [[nodiscard]] WhenAllDyn {
 public:
     explicit WhenAllDyn(std::vector<TaskT>&& tasks) noexcept
             : tasks{std::move(tasks)} {
@@ -1385,8 +1391,8 @@ public:
                 std::make_move_iterator(end(tasks)),
                 begin(stacks),
                 [continuation](TaskT&& task) {
-                    auto ret = [](auto task)
-                            -> WhenAllStack<typename TaskT::promise_type::ValueType> {
+                    auto ret =
+                            [](auto task) -> WhenAllStack<decltype(task.await_resume())> {
                         co_return co_await task;
                     }(std::move(task));
                     ret.co.promise().continuation = continuation;
@@ -1400,12 +1406,13 @@ public:
         return stacks[0]->erased_top().co;
     }
 
-    std::vector<typename Void<typename TaskT::promise_type::ValueType>::WrapperT>
+    std::vector<typename Void<decltype(std::declval<TaskT>().await_resume())>::WrapperT>
     await_resume() noexcept(false) {
-        std::vector<typename Void<typename TaskT::promise_type::ValueType>::WrapperT> ret(
-                stacks.size());
+        std::vector<
+                typename Void<decltype(std::declval<TaskT>().await_resume())>::WrapperT>
+                ret(stacks.size());
         std::transform(begin(stacks), end(stacks), begin(ret), [](auto const& stack) {
-            return Void<typename TaskT::promise_type::ValueType>::take(*stack);
+            return Void<decltype(std::declval<TaskT>().await_resume())>::take(*stack);
         });
         return ret;
     }
@@ -1434,7 +1441,7 @@ struct WhenAnyStack {
         }
 
         auto final_suspend() noexcept {
-            struct Awaiter {
+            struct [[nodiscard]] Awaiter {
                 std::optional<std::shared_ptr<TaskStack>> continuation;
                 unsigned index{};
 
@@ -1481,8 +1488,8 @@ struct WhenAnyStack {
             co; // todo:? is available as first frame in the stack
 };
 
-template <class... TaskT /*Coroutine Concept*/>
-class WhenAny {
+template <AwaitableC... TaskT>
+class [[nodiscard]] WhenAny {
 public:
     static_assert(sizeof...(TaskT) > 0);
 
@@ -1509,8 +1516,7 @@ public:
         auto task_wrappers = std::apply(
                 []<typename... X>(X&&... task) {
                     return std::tuple{
-                            [](auto task)
-                                    -> WhenAnyStack<typename X::promise_type::ValueType> {
+                            [](auto task) -> WhenAnyStack<decltype(task.await_resume())> {
                                 co_return co_await task;
                             }(std::move(task))...};
                 },
@@ -1548,7 +1554,7 @@ public:
     }
 
     using ReturnType = std::variant<
-            typename Void<typename TaskT::promise_type::ValueType>::WrapperT...>;
+            typename Void<decltype(std::declval<TaskT>().await_resume())>::WrapperT...>;
 
     ReturnType await_resume() noexcept(false) {
         auto const continuation = this->continuation.lock();
@@ -1560,10 +1566,11 @@ public:
             }(continuation->completed_task_index == Is
               && (alonite_assert(stacks[Is].lock(), Invariant{}),
                   ret = ReturnType{std::in_place_index<Is>,
-                                   Void<typename std::tuple_element_t<
-                                           Is,
-                                           std::tuple<TaskT...>>::promise_type::
-                                                ValueType>::take(*stacks[Is].lock())},
+                                   Void<decltype(std::declval<std::tuple_element_t<
+                                                         Is,
+                                                         std::tuple<TaskT...>>>()
+                                                         .await_resume())>::
+                                           take(*stacks[Is].lock())},
                   true)...);
         }(std::make_index_sequence<sizeof...(TaskT)>());
 
@@ -1576,8 +1583,8 @@ private:
     std::array<std::weak_ptr<TaskStack>, sizeof...(TaskT)> stacks;
 };
 
-template <class TaskT /*Coroutine Concept*/>
-class WhenAnyDyn {
+template <AwaitableC TaskT>
+class [[nodiscard]] WhenAnyDyn {
 public:
     explicit WhenAnyDyn(std::vector<TaskT>&& tasks) noexcept
             : tasks{std::move(tasks)} {
@@ -1603,8 +1610,8 @@ public:
                 std::make_move_iterator(end(tasks)),
                 begin(stacks),
                 [this, i = size_t(0), id](TaskT&& task) mutable {
-                    auto ret = [](auto task)
-                            -> WhenAnyStack<typename TaskT::promise_type::ValueType> {
+                    auto ret =
+                            [](auto task) -> WhenAnyStack<decltype(task.await_resume())> {
                         co_return co_await task;
                     }(std::move(task));
                     ret.co.promise().continuation = continuation;
@@ -1628,12 +1635,13 @@ public:
         return stacks[0]->erased_top().co;
     }
 
-    using ReturnType = typename Void<typename TaskT::promise_type::ValueType>::WrapperT;
+    using ReturnType =
+            typename Void<decltype(std::declval<TaskT>().await_resume())>::WrapperT;
 
     ReturnType await_resume() noexcept(false) {
         auto const continuation = this->continuation.lock();
         alonite_assert(continuation, Invariant{});
-        return Void<typename TaskT::promise_type::ValueType>::take(
+        return Void<decltype(std::declval<TaskT>().await_resume())>::take(
                 *stacks[continuation->completed_task_index].lock());
     }
 
@@ -1643,7 +1651,7 @@ private:
     std::vector<std::weak_ptr<TaskStack>> stacks;
 };
 
-inline auto spawn(Awaitable auto&& task) noexcept(false)
+inline auto spawn(AwaitableC auto&& task) noexcept(false)
         -> JoinHandle<decltype(task.await_resume())> {
     using T = decltype(task.await_resume());
     auto t = [](auto task) -> JoinHandle<T> {
@@ -1652,7 +1660,7 @@ inline auto spawn(Awaitable auto&& task) noexcept(false)
     return t;
 }
 
-class Yield {
+class [[nodiscard]] Yield {
 public:
     bool await_ready() const noexcept {
         return false;
@@ -1672,8 +1680,8 @@ public:
     }
 };
 
-template <Awaitable A>
-class WithExecutor {
+template <AwaitableC A>
+class [[nodiscard]] WithExecutor {
     using R = decltype(std::declval<A>().await_resume());
 
     struct Stack {
