@@ -16,18 +16,24 @@ class UnboundState {
 public:
     /// \throw std::bad_alloc
     void push(T value) noexcept(false) {
-        queue.push_back(std::move(value));
+        {
+            std::scoped_lock lock{mutex};
+            queue.push_back(std::move(value));
+        }
         cv.notify_one();
     }
 
     Task<std::optional<T>> pop() noexcept {
+        std::unique_lock lock{mutex};
         if (!queue.empty()) {
             auto ret = std::move(queue.front());
             queue.pop_front();
             co_return ret;
         }
 
+        lock.unlock();
         co_await cv.wait();
+        lock.lock();
 
         auto const ret = std::move(queue.front());
         queue.pop_front();
@@ -35,6 +41,7 @@ public:
     }
 
 private:
+    std::mutex mutex;
     std::deque<T> queue;
     ConditionVariable cv;
 };
@@ -44,14 +51,15 @@ private:
 template <class T>
 class UnboundSender;
 
+/// \note The receiver is thread safe. You can share it among different threads.
 template <class T>
 class UnboundReceiver {
 public:
-    UnboundReceiver(UnboundReceiver const&) = delete;
-    UnboundReceiver operator=(UnboundReceiver const&) = delete;
+    UnboundReceiver(UnboundReceiver const&) = default;
+    UnboundReceiver& operator=(UnboundReceiver const&) = default;
 
     UnboundReceiver(UnboundReceiver&&) = default;
-    UnboundReceiver operator=(UnboundReceiver&&) = delete;
+    UnboundReceiver& operator=(UnboundReceiver&&) = default;
 
     Task<std::optional<T>> recv() noexcept {
         co_return co_await state->pop();
