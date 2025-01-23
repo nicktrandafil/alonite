@@ -1023,6 +1023,41 @@ public:
         return t.stack->template take_result<T>();
     }
 
+    auto block_on(AwaitableC auto task, unsigned additional_threads) {
+        if (additional_threads == 0) {
+            return block_on(std::move(task));
+        }
+
+        ConditionVariable cv;
+        std::thread t1{[&] {
+            pool_exec.block_on([](auto& cv) -> Task<void> {
+                cv.notify_one();
+                co_await cv.wait();
+            }(cv));
+        }};
+
+        ThisThreadExecutor{}.block_on(cv.wait());
+
+        std::vector<std::thread> threads(additional_threads - 1);
+        for (auto& t : threads) {
+            t = std::thread{[&] {
+                pool_exec.block_on(Yield{});
+            }};
+        }
+
+        ALONITE_SCOPE_EXIT {
+            t1.join();
+            for (auto& t : threads) {
+                t.join();
+            }
+        };
+
+        return block_on([](auto task, auto& cv) -> Task<decltype(task.await_resume())> {
+            ALONITE_SCOPE_EXIT { cv.notify_all(); };
+            co_return co_await task;
+        })
+    }
+
     void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
         std::lock_guard lock{mutex};
         spawned_tasks.emplace(std::move(x));
