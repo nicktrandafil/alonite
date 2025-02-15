@@ -73,3 +73,27 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     REQUIRE(delay * n <= dur);
     REQUIRE(dur <= delay * n + delay);
 }
+
+TEST_CASE("concurrent send and receive", "[mpsc]") {
+    using namespace std::chrono_literals;
+    auto [tx, rx] = mpsc::unbound_channel<int>();
+    ThreadPoolExecutor executor;
+    int n = 0;
+    executor.block_on([&]() -> Task<void> {
+        spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+            for (int i = 0; true; ++i) {
+                tx.send(i);
+                co_await Yield{};
+            }
+            co_return;
+        }(std::move(tx))});
+
+        int i = 0;
+        while (auto const x = co_await rx.recv()) {
+            REQUIRE(x == i++);
+        }
+
+        co_return;
+    }());
+    REQUIRE(n == 100000);
+}

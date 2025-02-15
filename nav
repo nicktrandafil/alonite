@@ -17,7 +17,10 @@ echo "Initialize Release" \
 && mkdir -p build/Release \
 && cmake -S . -B build/Release -GNinja
 
-echo "Build Release and run" \
-&& cmake --build build/Release -t test_alonite \
-&& echo "Test" \
-&& ./build/Release/test_alonite
+echo "Release|build,run tests" | tee -a log \
+&& cmake --build build/Release -t test_alonite 2>&1 | tee -a log \
+&& ./build/Release/test_alonite 2>&1 | tee -a log; alert
+
+echo "Debug|build,run tests" | tee -a log \
+&& cmake --build build/Debug -t test_alonite 2>&1 | tee -a log \
+&& ./build/Debug/test_alonite 2>&1 | tee -a log; alert

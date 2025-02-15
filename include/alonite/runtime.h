@@ -1,5 +1,6 @@
 #pragma once
 
+#include "common.h"
 #include "contract.h"
 #include "scope_exit.h"
 
@@ -24,8 +25,6 @@
 #include <variant>
 #include <vector>
 
-// todo: std::function with non trivial function object allocates, try to avoid this
-
 #define alonite_print(...)                                                               \
     std::format_to(std::ostreambuf_iterator{std::cout}, __VA_ARGS__)
 
@@ -48,13 +47,6 @@ concept TaskC = AwaitableC<T> && CoroC<T>;
 
 constexpr inline unsigned long long operator""_KB(unsigned long long const x) {
     return 1024L * x;
-}
-
-template <class T>
-std::optional<T> take(std::optional<T>& x) {
-    std::optional<T> ret;
-    ret.swap(x);
-    return ret;
 }
 
 class TaskStack;
@@ -499,9 +491,7 @@ private:
         Awaiter& operator=(Awaiter const&) = delete;
 
         Awaiter(Awaiter&& rhs) noexcept
-                : cv{rhs.cv} {
-            rhs.cv = nullptr;
-        }
+                : cv{take(rhs.cv)}, ex{take(rhs.ex)} {}
 
         Awaiter& operator=(Awaiter&& rhs) noexcept {
             this->~Awaiter();
@@ -519,18 +509,18 @@ private:
         template <class U>
         void await_suspend(std::coroutine_handle<U> continuation) noexcept {
             ex = current_executor;
-            (*ex)->increment_external_work();
-            std::lock_guard lock{cv->mutex};
-            cv->continuations.push_back(continuation.promise().stack);
+            std::lock_guard lock{cv.value()->mutex};
+            cv.value()->continuations.push_back(continuation.promise().stack);
+            ex.value()->increment_external_work();
         }
 
         ~Awaiter() noexcept {
-            if (cv) {
-                ex.value()->decrement_external_work();
+            if (ex) {
+                (*ex)->decrement_external_work();
             }
         }
 
-        ConditionVariable* cv;
+        std::optional<ConditionVariable*> cv;
         std::optional<Executor*> ex;
     };
 
@@ -917,6 +907,26 @@ private:
     size_t external_work{0};
 };
 
+class [[nodiscard]] Yield {
+public:
+    bool await_ready() const noexcept {
+        return false;
+    }
+
+    template <class T>
+    void await_suspend(std::coroutine_handle<T> caller) noexcept(false) {
+        current_executor->spawn(Work{[continuation = caller.promise().stack] {
+                                         if (auto const x = continuation.lock()) {
+                                             x->erased_top().co.resume();
+                                         }
+                                     },
+                                     std::weak_ptr{caller.promise().stack}});
+    }
+
+    void await_resume() const noexcept {
+    }
+};
+
 class ThreadPoolExecutor : public Executor {
 public:
     /// \post reentrant
@@ -969,7 +979,6 @@ public:
                 std::atomic_notify_all(&active_threads);
             };
             while (true) {
-                using std::chrono_literals::operator""ms;
                 using std::chrono::steady_clock;
 
                 std::vector<Work> tasks2;
@@ -978,7 +987,7 @@ public:
                     {
                         std::lock_guard lock{mutex};
 
-                        auto const n = std::min(32ul, tasks.size());
+                        auto const n = std::min(32ul, tasks.size()); // ft1: Batching
                         tasks2.assign(std::make_move_iterator(begin(tasks)),
                                       std::make_move_iterator(begin(tasks) + n));
                         tasks.erase(begin(tasks), begin(tasks) + n);
@@ -1023,25 +1032,28 @@ public:
         return t.stack->template take_result<T>();
     }
 
-    auto block_on(AwaitableC auto task, unsigned additional_threads) {
+    auto block_on(AwaitableC auto task, unsigned additional_threads) noexcept(false) {
         if (additional_threads == 0) {
             return block_on(std::move(task));
         }
 
         ConditionVariable cv;
+        std::binary_semaphore sem{0};
         std::thread t1{[&] {
-            pool_exec.block_on([](auto& cv) -> Task<void> {
-                cv.notify_one();
+            block_on([](auto& cv, auto& sem) -> Task<void> {
+                sem.release();
                 co_await cv.wait();
-            }(cv));
+            }(cv, sem));
         }};
 
-        ThisThreadExecutor{}.block_on(cv.wait());
+        sem.acquire();
 
         std::vector<std::thread> threads(additional_threads - 1);
         for (auto& t : threads) {
             t = std::thread{[&] {
-                pool_exec.block_on(Yield{});
+                block_on([]() -> Task<void> {
+                    co_return;
+                }());
             }};
         }
 
@@ -1053,9 +1065,11 @@ public:
         };
 
         return block_on([](auto task, auto& cv) -> Task<decltype(task.await_resume())> {
-            ALONITE_SCOPE_EXIT { cv.notify_all(); };
+            ALONITE_SCOPE_EXIT {
+                cv.notify_all();
+            };
             co_return co_await task;
-        })
+        }(std::move(task), cv));
     }
 
     void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
@@ -1695,26 +1709,6 @@ inline auto spawn(AwaitableC auto&& task) noexcept(false)
     return t;
 }
 
-class [[nodiscard]] Yield {
-public:
-    bool await_ready() const noexcept {
-        return false;
-    }
-
-    template <class T>
-    void await_suspend(std::coroutine_handle<T> caller) noexcept(false) {
-        current_executor->spawn(Work{[continuation = caller.promise().stack] {
-                                         if (auto const x = continuation.lock()) {
-                                             x->erased_top().co.resume();
-                                         }
-                                     },
-                                     std::weak_ptr{caller.promise().stack}});
-    }
-
-    void await_resume() const noexcept {
-    }
-};
-
 template <AwaitableC A>
 class [[nodiscard]] WithExecutor {
     using R = decltype(std::declval<A>().await_resume());
@@ -1778,8 +1772,12 @@ public:
     WithExecutor(WithExecutor const&) = delete;
     WithExecutor& operator=(WithExecutor const&) = delete;
 
-    WithExecutor(WithExecutor&&) = default;
-    WithExecutor& operator=(WithExecutor&&) = default;
+    WithExecutor(WithExecutor&& rhs) noexcept : ex{take(rhs.ex)}, aw{take(rhs.aw)}, stack{take(rhs.stack)}, prev_ex{take(rhs.prev_ex)} {}
+
+    WithExecutor& operator=(WithExecutor&& rhs) noexcept {
+        this->~WithExecutor();
+        return *new (this) WithExecutor{std::move(rhs)};
+    }
 
     ~WithExecutor() {
         if (auto const ex = take(prev_ex)) {

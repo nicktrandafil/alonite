@@ -791,6 +791,35 @@ TEST_CASE("check reentrant", "[ThreadPoolExecutor::block_on][fuzz]") {
     }
 }
 
+TEST_CASE("additional threads", "[ThreadPoolExecutor::block_on]") {
+    using namespace std::chrono_literals;
+    ThreadPoolExecutor executor;
+    auto const start = steady_clock::now();
+    executor.block_on(WhenAll{
+                              []() -> Task<void> {
+                                  // We don't want all three sleeps to end up
+                                  // in one thread's batch. See ft1: Batching.
+                                  co_await Sleep{1ms};
+                                  std::this_thread::sleep_for(9ms);
+                                  co_return;
+                              }(),
+                              []() -> Task<void> {
+                                  co_await Sleep{2ms};
+                                  std::this_thread::sleep_for(8ms);
+                                  co_return;
+                              }(),
+                              []() -> Task<void> {
+                                  co_await Sleep{3ms};
+                                  std::this_thread::sleep_for(7ms);
+                                  co_return;
+                              }(),
+                      },
+                      2);
+    auto const elapsed = steady_clock::now() - start;
+    REQUIRE(elapsed >= 10ms);
+    REQUIRE(elapsed <= 13ms);
+}
+
 TEST_CASE("check actual 2 threads do the tasks", "[ThreadPoolExecutor::block_on]") {
     using namespace std::chrono_literals;
     ThreadPoolExecutor executor;
@@ -869,9 +898,7 @@ TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
     s.acquire();
 
     auto const start = steady_clock::now();
-    exec.block_on([]() -> Task<void> {
-        co_return;
-    }());
+    exec.block_on(Yield{});
     auto const elapsed = steady_clock::now() - start;
 
     t.join();
@@ -892,7 +919,7 @@ TEST_CASE("change executor and yield", "[WithExecutor]") {
         }(cv));
     }};
 
-    ThisThreadExecutor{}.block_on(cv.wait());
+    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
 
     ALONITE_SCOPE_EXIT {
         t1.join();
@@ -917,7 +944,7 @@ TEST_CASE("change executor and sleep", "[WithExecutor]") {
         }(cv));
     }};
 
-    ThisThreadExecutor{}.block_on(cv.wait());
+    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
 
     ALONITE_SCOPE_EXIT {
         t1.join();
@@ -942,7 +969,7 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
         }(cv));
     }};
 
-    ThisThreadExecutor{}.block_on(cv.wait());
+    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
 
     std::thread t2{[&] {
         pool_exec.block_on(Yield{});
@@ -961,23 +988,31 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
     auto const start = steady_clock::now();
 
     exec.block_on([](auto& ex, auto& cv) -> Task<void> {
-        co_await WithExecutor{&ex, []() -> Task<void> {
-                                  co_await WhenAll{[]() -> Task<void> {
-                                                       std::this_thread::sleep_for(100ms);
-                                                       co_return;
-                                                   }(),
-                                                   []() -> Task<void> {
-                                                       std::this_thread::sleep_for(100ms);
-                                                       co_return;
-                                                   }()};
-                              }()};
+        co_await WithExecutor{&ex,
+                              WhenAll{[]() -> Task<void> {
+                                          // We don't want all three sleeps to end up
+                                          // in one thread's batch. See ft1: Batching.
+                                          co_await Sleep{1ms};
+                                          std::this_thread::sleep_for(99ms);
+                                          co_return;
+                                      }(),
+                                      []() -> Task<void> {
+                                          co_await Sleep{2ms};
+                                          std::this_thread::sleep_for(98ms);
+                                          co_return;
+                                      }(),
+                                      []() -> Task<void> {
+                                          co_await Sleep{3ms};
+                                          std::this_thread::sleep_for(97ms);
+                                          co_return;
+                                      }()}};
         cv.notify_all();
         co_return;
     }(pool_exec, cv));
 
     auto const elapsed = steady_clock::now() - start;
     REQUIRE(100ms <= elapsed);
-    REQUIRE(elapsed < 110ms);
+    REQUIRE(elapsed < 103ms);
 }
 
 TEST_CASE(
@@ -997,7 +1032,7 @@ TEST_CASE(
             }(cv));
         }};
 
-        co_await cv.wait();
+        co_await cv.wait(); // ticket-1: use semaphore
 
         std::thread t2{[&] {
             pool_exec.block_on(Yield{});
