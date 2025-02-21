@@ -491,7 +491,9 @@ private:
         Awaiter& operator=(Awaiter const&) = delete;
 
         Awaiter(Awaiter&& rhs) noexcept
-                : cv{take(rhs.cv)}, ex{take(rhs.ex)} {}
+                : cv{take(rhs.cv)}
+                , ex{take(rhs.ex)} {
+        }
 
         Awaiter& operator=(Awaiter&& rhs) noexcept {
             this->~Awaiter();
@@ -1772,7 +1774,12 @@ public:
     WithExecutor(WithExecutor const&) = delete;
     WithExecutor& operator=(WithExecutor const&) = delete;
 
-    WithExecutor(WithExecutor&& rhs) noexcept : ex{take(rhs.ex)}, aw{take(rhs.aw)}, stack{take(rhs.stack)}, prev_ex{take(rhs.prev_ex)} {}
+    WithExecutor(WithExecutor&& rhs) noexcept
+            : ex{take(rhs.ex)}
+            , aw{take(rhs.aw)}
+            , stack{take(rhs.stack)}
+            , prev_ex{take(rhs.prev_ex)} {
+    }
 
     WithExecutor& operator=(WithExecutor&& rhs) noexcept {
         this->~WithExecutor();

@@ -18,4 +18,4 @@ T* take(T*& x) {
     return ret;
 }
 
-}
+} // namespace alonite

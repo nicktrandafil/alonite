@@ -67,24 +67,23 @@ public:
         std::unique_lock lock{mutex};
         sender_count -= 1;
         if (sender_count == 0) {
-            close_conc();
+            closed = true;
+            lock.unlock();
+            cv.notify_all();
         }
     }
 
     void close() {
         std::unique_lock lock{mutex};
-        close_conc();
-    }
-
-private:
-    void close_conc/*urrently*/() {
         closed = true;
+        lock.unlock();
         cv.notify_all();
     }
 
+private:
+    ConditionVariable cv;
     std::mutex mutex;
     std::deque<T> queue;
-    ConditionVariable cv;
     bool closed = false;
     unsigned sender_count{1};
 };
@@ -101,7 +100,9 @@ public:
     UnboundReceiver(UnboundReceiver const&) = delete;
     UnboundReceiver& operator=(UnboundReceiver const&) = delete;
 
-    UnboundReceiver(UnboundReceiver&& rhs) noexcept : state{take(rhs.state)} {}
+    UnboundReceiver(UnboundReceiver&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
 
     UnboundReceiver& operator=(UnboundReceiver&& rhs) noexcept {
         this->~UnboundReceiver();
@@ -134,7 +135,8 @@ private:
 template <class T>
 class UnboundSender {
 public:
-    UnboundSender(UnboundSender const& rhs) : state{rhs.state} {
+    UnboundSender(UnboundSender const& rhs)
+            : state{rhs.state} {
         if (state) {
             state.value()->inc_sender();
         }
@@ -145,7 +147,9 @@ public:
         return *this = std::move(tmp);
     }
 
-    UnboundSender(UnboundSender&& rhs) noexcept : state{take(rhs.state)} {}
+    UnboundSender(UnboundSender&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
 
     UnboundSender& operator=(UnboundSender&& rhs) noexcept {
         this->~UnboundSender();

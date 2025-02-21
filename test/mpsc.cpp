@@ -74,26 +74,66 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     REQUIRE(dur <= delay * n + delay);
 }
 
-TEST_CASE("concurrent send and receive", "[mpsc]") {
+TEST_CASE("send values for 500ms; channel auto-close is involved", "[mpsc]") {
     using namespace std::chrono_literals;
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThreadPoolExecutor executor;
     int n = 0;
     executor.block_on([&]() -> Task<void> {
         spawn(Timeout{500ms, [](auto tx) -> Task<void> {
-            for (int i = 0; true; ++i) {
-                tx.send(i);
-                co_await Yield{};
-            }
-            co_return;
-        }(std::move(tx))});
+                          for (int i = 0; true; ++i) {
+                              tx.send(i);
+                              co_await Yield{};
+                          }
+                          co_return;
+                      }(std::move(tx))});
 
-        int i = 0;
         while (auto const x = co_await rx.recv()) {
-            REQUIRE(x == i++);
+            REQUIRE(x == n++);
         }
 
         co_return;
     }());
-    REQUIRE(n == 100000);
+    REQUIRE(n > 150000);
+}
+
+TEST_CASE("send values for 500ms concurrently", "[mpsc]") {
+    using namespace std::chrono_literals;
+    auto [tx, rx] = mpsc::unbound_channel<int>();
+    ThreadPoolExecutor executor;
+    int n = 0;
+    executor.block_on(
+            [&]() -> Task<void> {
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                while (auto const x = co_await rx.recv()) {
+                    REQUIRE(x == n++);
+                }
+
+                co_return;
+            }(),
+            3);
+    REQUIRE(n > 100000);
 }

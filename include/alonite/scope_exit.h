@@ -53,6 +53,8 @@ struct MakeScopeFail {
 
 #define ALONITE_UNIQUE_IDENTIFIER ALONITE_CONCATENATE(UNIQUE_IDENTIFIER_, __LINE__)
 
-#define ALONITE_SCOPE_EXIT auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeExit{}->*[&]
+#define ALONITE_SCOPE_EXIT                                                               \
+    auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeExit{}->*[&]
 
-#define ALONITE_SCOPE_FAIL auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeFail{}->*[&]
+#define ALONITE_SCOPE_FAIL                                                               \
+    auto const ALONITE_UNIQUE_IDENTIFIER = alonite::MakeScopeFail{}->*[&]
