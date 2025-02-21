@@ -67,7 +67,8 @@ IncludeCategories:
     Priority: 4
   # Qt
   - Regex: "^<Q.*>$"
-    Priority: 4
+    Priority: 5
+    CaseSensitive: true
   # std
   - Regex: "^<.+"
     Priority: 6

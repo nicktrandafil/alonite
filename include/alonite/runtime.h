@@ -4,8 +4,6 @@
 #include "contract.h"
 #include "scope_exit.h"
 
-#include <queue>
-
 #include <any>
 #include <atomic>
 #include <condition_variable>
@@ -16,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <stack>
 #include <thread>
 #include <type_traits>
