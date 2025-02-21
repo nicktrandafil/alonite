@@ -137,3 +137,28 @@ TEST_CASE("send values for 500ms concurrently", "[mpsc]") {
             3);
     REQUIRE(n > 100000);
 }
+
+TEST_CASE("auto-close on receiver drop", "[mpsc]") {
+    auto [tx, rx] = mpsc::unbound_channel<int>();
+    [](auto){}(std::move(rx));
+    REQUIRE_THROWS_AS(tx.send(1), mpsc::ClosedError);
+}
+
+TEST_CASE("auto-close on all senders drop", "[mpsc]") {
+    auto [tx, rx] = mpsc::unbound_channel<int>();
+    [](auto){}(std::move(tx));
+    ThisThreadExecutor{}.block_on([](auto rx) -> Task<void> {
+        REQUIRE(co_await rx.recv() == std::nullopt);
+    }(std::move(rx)));
+}
+
+TEST_CASE("you can receive buffered messages from a closed channel", "[mpsc]") {
+    auto [tx, rx] = mpsc::unbound_channel<int>();
+    tx.send(1);
+    [](auto){}(std::move(tx));
+    ThisThreadExecutor{}.block_on([](auto rx) -> Task<void> {
+        auto const x = co_await rx.recv();
+        REQUIRE(x == 1);
+        REQUIRE(co_await rx.recv() == std::nullopt);
+    }(std::move(rx)));
+}
