@@ -196,7 +196,6 @@ TEST_CASE("the task was already completed by the abort time", "[spawn]") {
     bool run = false;
     bool exception = false;
     executor.block_on([&]() -> Task<void> {
-        // todo: avoid this when multi-threaded executor is supported
         JoinHandle<void>* hack = nullptr;
         JoinHandle<void> handle = spawn([](bool& run, auto const& hack) -> Task<void> {
             run = true;
@@ -692,7 +691,7 @@ TEST_CASE("one void task, one int which should be canceled", "[WhenAny]") {
     REQUIRE(counter == 2);
 }
 
-TEST_CASE("anyh of 5ms and 10ms is 5ms", "[WhenAny]") {
+TEST_CASE("any of 5ms and 10ms is 5ms", "[WhenAny]") {
     // ThisThreadExecutor doesn't work here, because it is not time
     // precise. It intentionally doesn't employ conditional variable
     // to optimize for speed.
@@ -827,15 +826,11 @@ TEST_CASE("check actual 2 threads do the tasks", "[ThreadPoolExecutor::block_on]
     auto const start = steady_clock::now();
 
     std::thread t1{[&] {
-        executor.block_on([]() -> Task<void> {
-            co_await Sleep{10ms};
-        }());
+        executor.block_on(Sleep{10ms});
     }};
 
     std::thread t2{[&] {
-        executor.block_on([]() -> Task<void> {
-            co_await Sleep{10ms};
-        }());
+        executor.block_on(Sleep{10ms});
     }};
 
     t1.join();
@@ -855,9 +850,7 @@ TEST_CASE("block current thread, other tasks should get progress",
     auto const start = steady_clock::now();
 
     std::thread t1{[&] {
-        executor.block_on([]() -> Task<void> {
-            co_await Sleep{17ms};
-        }());
+        executor.block_on(Sleep{17ms});
     }};
 
     std::thread t2{[&] {
