@@ -12,22 +12,41 @@
 namespace alonite::mpsc {
 
 struct ClosedError : std::exception {
+    explicit Closed(std::optional<std::any> value = {}) : value{std::move(value)} {}
+
     const char* what() const noexcept override {
         return "closed";
     }
+
+    /// If suspending send failed, then the value reported back here.
+    std::optional<std::any> value;
 };
 
 namespace detail {
 
 template <class T>
-class UnboundState {
+class State {
 public:
-    UnboundState() = default;
-    UnboundState(UnboundState const&) = delete;
-    UnboundState& operator=(UnboundState const&) = delete;
+    State() = default;
+    State(State const&) = delete;
+    State& operator=(State const&) = delete;
 
-    /// \throw std::bad_alloc
-    void push(T value) noexcept(false) {
+    /// \throw std::bad_alloc, ClosedError
+    /// \post Moved only and only if succeeded.
+    void push(T&& value) noexcept(false) {
+        {
+            std::scoped_lock lock{mutex};
+            if (closed) {
+                throw ClosedError{};
+            } else {
+                queue.push_back(std::move(value));
+            }
+        }
+        cv.notify_one();
+    }
+
+    /// \throw std::bad_alloc, ClosedError
+    Task<void> push(T value) noexcept(false) {
         {
             std::scoped_lock lock{mutex};
             if (closed) {
@@ -125,11 +144,11 @@ private:
     friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
             false);
 
-    UnboundReceiver(std::shared_ptr<detail::UnboundState<T>> state) noexcept
+    UnboundReceiver(std::shared_ptr<detail::State<T>> state) noexcept
             : state{std::move(state)} {
     }
 
-    std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
+    std::optional<std::shared_ptr<detail::State<T>>> state;
 };
 
 template <class T>
@@ -175,18 +194,43 @@ private:
     friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
             false);
 
-    UnboundSender(std::shared_ptr<detail::UnboundState<T>> state) noexcept
+    UnboundSender(std::shared_ptr<detail::State<T>> state) noexcept
             : state{std::move(state)} {
     }
 
-    std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
+    std::optional<std::shared_ptr<detail::State<T>>> state;
 };
 
 /// \throw std::bad_alloc
 template <class T>
 std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
-    auto state = std::make_shared<detail::UnboundState<T>>();
+    auto state = std::make_shared<detail::State<T>>();
     return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
+}
+
+template <class T>
+class Receiver : private UnboundReceiver<T> {
+public:
+    using UnboundReceiver<T>::UnboundReceiver;
+    using UnboundReceiver<T>::operator=;
+
+    using UnboundReceiver::recv;
+
+private:
+    template <class U>
+    friend std::pair<Sender<U>, Receiver<U>> channel() noexcept(false);
+};
+
+template <class T>
+class Sender {
+
+};
+
+/// \throw std::bad_alloc
+template <class T>
+std::pair<Sender<T>, Receiver<T>> channel() noexcept(false) {
+    auto state = std::make_shared<detail::State<T>>();
+    return {Sender<T>{state}, Receiver<T>{std::move(state)}};
 }
 
 } // namespace alonite::mpsc
