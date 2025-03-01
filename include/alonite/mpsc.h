@@ -12,7 +12,9 @@
 namespace alonite::mpsc {
 
 struct ClosedError : std::exception {
-    explicit Closed(std::optional<std::any> value = {}) : value{std::move(value)} {}
+    explicit ClosedError(std::optional<std::any> value = {})
+            : value{std::move(value)} {
+    }
 
     const char* what() const noexcept override {
         return "closed";
@@ -25,60 +27,15 @@ struct ClosedError : std::exception {
 namespace detail {
 
 template <class T>
-class State {
-public:
-    State() = default;
-    State(State const&) = delete;
-    State& operator=(State const&) = delete;
-
-    /// \throw std::bad_alloc, ClosedError
-    /// \post Moved only and only if succeeded.
-    void push(T&& value) noexcept(false) {
-        {
-            std::scoped_lock lock{mutex};
-            if (closed) {
-                throw ClosedError{};
-            } else {
-                queue.push_back(std::move(value));
-            }
-        }
-        cv.notify_one();
-    }
-
-    /// \throw std::bad_alloc, ClosedError
-    Task<void> push(T value) noexcept(false) {
-        {
-            std::scoped_lock lock{mutex};
-            if (closed) {
-                throw ClosedError{};
-            } else {
-                queue.push_back(std::move(value));
-            }
-        }
-        cv.notify_one();
-    }
-
-    Task<std::optional<T>> pop() noexcept {
-        std::unique_lock lock{mutex};
-        while (true) {
-            if (!queue.empty()) {
-                auto ret = std::move(queue.front());
-                queue.pop_front();
-                co_return ret;
-            }
-
-            if (closed) {
-                co_return std::nullopt;
-            }
-
-            lock.unlock();
-            co_await cv.wait();
-            lock.lock();
-        }
-    }
+struct CommonState {
+    ConditionVariable consumer_cv;
+    std::mutex mutex;
+    std::deque<T> queue;
+    bool closed = false;
+    unsigned sender_count{1};
 
     void inc_sender() {
-        std::unique_lock lock{mutex};
+        std::scoped_lock lock{mutex};
         sender_count += 1;
     }
 
@@ -88,7 +45,7 @@ public:
         if (sender_count == 0) {
             closed = true;
             lock.unlock();
-            cv.notify_all();
+            consumer_cv.notify_all();
         }
     }
 
@@ -96,15 +53,105 @@ public:
         std::unique_lock lock{mutex};
         closed = true;
         lock.unlock();
-        cv.notify_all();
+        consumer_cv.notify_all();
+    }
+};
+
+template <class T>
+class UnboundState : public CommonState<T> {
+public:
+    UnboundState() = default;
+    UnboundState(UnboundState const&) = delete;
+    UnboundState& operator=(UnboundState const&) = delete;
+
+    /// \throw std::bad_alloc, ClosedError
+    /// \post Moved only and only if succeeded.
+    template <class U>
+        requires(std::is_same_v<T, std::decay_t<U>>)
+    void push(U&& value) noexcept(false) {
+        {
+            std::scoped_lock lock{this->mutex};
+            if (this->closed) {
+                throw ClosedError{};
+            } else {
+                this->queue.push_back(std::forward<U>(value));
+            }
+        }
+        this->consumer_cv.notify_one();
+    }
+
+    Task<std::optional<T>> pop() noexcept {
+        std::unique_lock lock{this->mutex};
+        while (true) {
+            if (!this->queue.empty()) {
+                auto ret = std::move(this->queue.front());
+                this->queue.pop_front();
+                co_return ret;
+            }
+
+            if (this->closed) {
+                co_return std::nullopt;
+            }
+
+            lock.unlock();
+            co_await this->consumer_cv.wait();
+            lock.lock();
+        }
+    }
+};
+
+template <class T>
+class State : public CommonState<T> {
+public:
+    explicit State(size_t limit)
+            : limit{limit} {};
+
+    State(State const&) = delete;
+    State& operator=(State const&) = delete;
+
+    /// \throw std::bad_alloc, ClosedError
+    Task<void> push(T value) noexcept(false) {
+        std::unique_lock lock{this->mutex};
+        while (true) {
+            if (this->closed) {
+                throw ClosedError{std::move(value)};
+            } else if (this->queue.size() < limit) {
+                this->queue.push_back(std::move(value));
+                break;
+            } else {
+                lock.unlock();
+                co_await producer_cv.wait();
+                lock.lock();
+            }
+        }
+        lock.unlock();
+        this->consumer_cv.notify_one();
+    }
+
+    Task<std::optional<T>> pop() noexcept {
+        std::unique_lock lock{this->mutex};
+        while (true) {
+            if (!this->queue.empty()) {
+                auto ret = std::move(this->queue.front());
+                this->queue.pop_front();
+                lock.unlock();
+                producer_cv.notify_one();
+                co_return ret;
+            }
+
+            if (this->closed) {
+                co_return std::nullopt;
+            }
+
+            lock.unlock();
+            co_await this->consumer_cv.wait();
+            lock.lock();
+        }
     }
 
 private:
-    ConditionVariable cv;
-    std::mutex mutex;
-    std::deque<T> queue;
-    bool closed = false;
-    unsigned sender_count{1};
+    size_t const limit;
+    ConditionVariable producer_cv;
 };
 
 } // namespace detail
@@ -144,11 +191,11 @@ private:
     friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
             false);
 
-    UnboundReceiver(std::shared_ptr<detail::State<T>> state) noexcept
+    UnboundReceiver(std::shared_ptr<detail::UnboundState<T>> state) noexcept
             : state{std::move(state)} {
     }
 
-    std::optional<std::shared_ptr<detail::State<T>>> state;
+    std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
 };
 
 template <class T>
@@ -183,8 +230,15 @@ public:
     }
 
     /// \throw std::bad_alloc, ClosedError
-    void send(T value) const noexcept(false) {
+    /// \post Moved only on success
+    void send(T&& value) const noexcept(false) {
         state.value()->push(std::move(value));
+    }
+
+    /// \throw std::bad_alloc, ClosedError
+    /// \post copied only on success
+    void send(T const& value) const noexcept(false) {
+        state.value()->push(value);
     }
 
 private:
@@ -194,7 +248,104 @@ private:
     friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
             false);
 
-    UnboundSender(std::shared_ptr<detail::State<T>> state) noexcept
+    UnboundSender(std::shared_ptr<detail::UnboundState<T>> state) noexcept
+            : state{std::move(state)} {
+    }
+
+    std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
+};
+
+/// \throw std::bad_alloc
+template <class T>
+std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
+    auto state = std::make_shared<detail::UnboundState<T>>();
+    return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
+}
+
+template <class T>
+class Sender;
+
+template <class T>
+class Receiver {
+public:
+    Receiver(Receiver const&) = delete;
+    Receiver& operator=(Receiver const&) = delete;
+
+    Receiver(Receiver&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
+
+    Receiver& operator=(Receiver&& rhs) noexcept {
+        this->~Receiver();
+        new (this) Receiver{std::move(rhs)};
+        return *this;
+    }
+
+    ~Receiver() {
+        if (state) {
+            state.value()->close();
+        }
+    }
+
+    /// \throw ClosedError
+    Task<std::optional<T>> recv() noexcept {
+        co_return co_await state.value()->pop();
+    }
+
+private:
+    template <class U>
+    friend std::pair<Sender<U>, Receiver<U>> channel(size_t limit) noexcept(false);
+
+    Receiver(std::shared_ptr<detail::State<T>> state) noexcept
+            : state{std::move(state)} {
+    }
+
+    std::optional<std::shared_ptr<detail::State<T>>> state;
+};
+
+template <class T>
+class Sender {
+public:
+    Sender(Sender const& rhs)
+            : state{rhs.state} {
+        if (state) {
+            state.value()->inc_sender();
+        }
+    }
+
+    Sender& operator=(Sender const& rhs) {
+        Sender tmp{rhs};
+        return *this = std::move(tmp);
+    }
+
+    Sender(Sender&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
+
+    Sender& operator=(Sender&& rhs) noexcept {
+        this->~Sender();
+        new (this) Sender{std::move(rhs)};
+        return *this;
+    }
+
+    ~Sender() {
+        if (state) {
+            state.value()->dec_sender();
+        }
+    }
+
+    /// \throw std::bad_alloc, ClosedError
+    Task<void> send(T value) const noexcept(false) {
+        co_await state.value()->push(std::move(value));
+    }
+
+private:
+    Sender() = default;
+
+    template <class U>
+    friend std::pair<Sender<U>, Receiver<U>> channel(size_t) noexcept(false);
+
+    Sender(std::shared_ptr<detail::State<T>> state) noexcept
             : state{std::move(state)} {
     }
 
@@ -203,33 +354,8 @@ private:
 
 /// \throw std::bad_alloc
 template <class T>
-std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
-    auto state = std::make_shared<detail::State<T>>();
-    return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
-}
-
-template <class T>
-class Receiver : private UnboundReceiver<T> {
-public:
-    using UnboundReceiver<T>::UnboundReceiver;
-    using UnboundReceiver<T>::operator=;
-
-    using UnboundReceiver::recv;
-
-private:
-    template <class U>
-    friend std::pair<Sender<U>, Receiver<U>> channel() noexcept(false);
-};
-
-template <class T>
-class Sender {
-
-};
-
-/// \throw std::bad_alloc
-template <class T>
-std::pair<Sender<T>, Receiver<T>> channel() noexcept(false) {
-    auto state = std::make_shared<detail::State<T>>();
+std::pair<Sender<T>, Receiver<T>> channel(size_t limit) noexcept(false) {
+    auto state = std::make_shared<detail::State<T>>(limit);
     return {Sender<T>{state}, Receiver<T>{std::move(state)}};
 }
 

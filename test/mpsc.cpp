@@ -7,7 +7,7 @@
 using namespace alonite;
 using std::chrono_literals::operator""ms;
 
-TEST_CASE("construct and send one value", "[mpsc]") {
+TEST_CASE("construct and send one value", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThisThreadExecutor executor;
     int counter = 0;
@@ -22,7 +22,7 @@ TEST_CASE("construct and send one value", "[mpsc]") {
 }
 
 TEST_CASE("construct and send many values, conditional variable isn't really involved",
-          "[mpsc]") {
+          "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThisThreadExecutor executor;
     int counter = 0;
@@ -45,7 +45,8 @@ TEST_CASE("construct and send many values, conditional variable isn't really inv
     REQUIRE(counter == 10);
 }
 
-TEST_CASE("construct and send many values, conditional variable is involved", "[mpsc]") {
+TEST_CASE("construct and send many values, conditional variable is involved",
+          "[mpsc][unbound]") {
     constexpr int n = 10;
     constexpr auto delay = 5ms;
     auto [tx, rx] = mpsc::unbound_channel<int>();
@@ -74,7 +75,7 @@ TEST_CASE("construct and send many values, conditional variable is involved", "[
     REQUIRE(dur <= delay * n + delay);
 }
 
-TEST_CASE("send values for 500ms; channel auto-close is involved", "[mpsc]") {
+TEST_CASE("send values for 500ms; channel auto-close is involved", "[mpsc][unbound]") {
     using namespace std::chrono_literals;
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThreadPoolExecutor executor;
@@ -97,7 +98,7 @@ TEST_CASE("send values for 500ms; channel auto-close is involved", "[mpsc]") {
     REQUIRE(n > 150000);
 }
 
-TEST_CASE("send values for 500ms concurrently", "[mpsc]") {
+TEST_CASE("send values for 500ms concurrently", "[mpsc][unbound]") {
     using namespace std::chrono_literals;
     auto [tx, rx] = mpsc::unbound_channel<int>();
     ThreadPoolExecutor executor;
@@ -138,27 +139,44 @@ TEST_CASE("send values for 500ms concurrently", "[mpsc]") {
     REQUIRE(n > 100000);
 }
 
-TEST_CASE("auto-close on receiver drop", "[mpsc]") {
+TEST_CASE("auto-close on receiver drop", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
-    [](auto){}(std::move(rx));
+    [](auto) {
+    }(std::move(rx));
     REQUIRE_THROWS_AS(tx.send(1), mpsc::ClosedError);
 }
 
-TEST_CASE("auto-close on all senders drop", "[mpsc]") {
+TEST_CASE("auto-close on all senders drop", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
-    [](auto){}(std::move(tx));
+    [](auto) {
+    }(std::move(tx));
     ThisThreadExecutor{}.block_on([](auto rx) -> Task<void> {
         REQUIRE(co_await rx.recv() == std::nullopt);
     }(std::move(rx)));
 }
 
-TEST_CASE("you can receive buffered messages from a closed channel", "[mpsc]") {
+TEST_CASE("you can receive buffered messages from a closed channel", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     tx.send(1);
-    [](auto){}(std::move(tx));
+    [](auto) {
+    }(std::move(tx));
     ThisThreadExecutor{}.block_on([](auto rx) -> Task<void> {
         auto const x = co_await rx.recv();
         REQUIRE(x == 1);
         REQUIRE(co_await rx.recv() == std::nullopt);
     }(std::move(rx)));
+}
+
+TEST_CASE("construct and send one value", "[mpsc][bound]") {
+    auto [tx, rx] = mpsc::channel<int>(1);
+    ThisThreadExecutor executor;
+    int counter = 0;
+    executor.block_on([&]() -> Task<void> {
+        co_await tx.send(5);
+        auto const x = co_await rx.recv();
+        ++counter;
+        REQUIRE(x == 5);
+        co_return;
+    }());
+    REQUIRE(counter == 1);
 }
