@@ -1,10 +1,8 @@
 #pragma once
 
 #include "common.h"
-#include "contract.h"
 #include "runtime.h"
 
-#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,15 +43,8 @@ struct CommonState {
         if (sender_count == 0) {
             closed = true;
             lock.unlock();
-            consumer_cv.notify_all();
+            consumer_cv.notify_one();
         }
-    }
-
-    void close() {
-        std::unique_lock lock{mutex};
-        closed = true;
-        lock.unlock();
-        consumer_cv.notify_all();
     }
 };
 
@@ -97,6 +88,12 @@ public:
             co_await this->consumer_cv.wait();
             lock.lock();
         }
+    }
+
+    void dec_receiver() {
+        std::unique_lock lock{this->mutex};
+        this->closed = true;
+        lock.unlock();
     }
 };
 
@@ -149,6 +146,13 @@ public:
         }
     }
 
+    void dec_receiver() {
+        std::unique_lock lock{this->mutex};
+        this->closed = true;
+        lock.unlock();
+        producer_cv.notify_all();
+    }
+
 private:
     size_t const limit;
     ConditionVariable producer_cv;
@@ -178,7 +182,7 @@ public:
 
     ~UnboundReceiver() {
         if (state) {
-            state.value()->close();
+            state.value()->dec_receiver();
         }
     }
 
@@ -283,7 +287,7 @@ public:
 
     ~Receiver() {
         if (state) {
-            state.value()->close();
+            state.value()->dec_receiver();
         }
     }
 
@@ -309,7 +313,7 @@ public:
     Sender(Sender const& rhs)
             : state{rhs.state} {
         if (state) {
-            state.value()->inc_sender();
+            (*state)->inc_sender();
         }
     }
 
@@ -330,11 +334,14 @@ public:
 
     ~Sender() {
         if (state) {
-            state.value()->dec_sender();
+            (*state)->dec_sender();
         }
     }
 
     /// \throw std::bad_alloc, ClosedError
+    /// \note If the consumer is fast enough and the internal buffer
+    /// doesn't fill up, then this call will not suspend. If you are in a loop,
+    /// then you might want to `co_await Yield{}` to give up the thread for a moment.
     Task<void> send(T value) const noexcept(false) {
         co_await state.value()->push(std::move(value));
     }
