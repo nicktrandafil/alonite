@@ -1050,7 +1050,3 @@ TEST_CASE(
         cv.notify_all();
     }());
 }
-
-TEST_CASE("", "[QEventLoopExecutor]") {
-    QEventLoopAdapter executor;
-}

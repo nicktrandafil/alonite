@@ -8,6 +8,7 @@ add_library(alonite INTERFACE
     include/alonite/contract.h
     include/alonite/log.h
     include/alonite/mpsc.h
+    include/alonite/qt.h
     include/alonite/runtime.h
     include/alonite/scope_exit.h
 )
@@ -28,7 +29,7 @@ option(alonite_WARNINGS_ARE_ERRORS "Warnings are errors" ON)
 find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
 message(STATUS "Using Qt${QT_VERSION_MAJOR}")
 find_package(Qt${QT_VERSION_MAJOR} REQUIRED QUIET COMPONENTS Core)
-target_link_libraries(rpc INTERFACE Qt${QT_VERSION_MAJOR}::Core)
+target_link_libraries(alonite INTERFACE Qt${QT_VERSION_MAJOR}::Core)
 
 add_executable(test_alonite
     test/mpsc.cpp
