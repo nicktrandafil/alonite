@@ -163,7 +163,7 @@ private:
 template <class T>
 class UnboundSender;
 
-/// \note The receiver is thread safe. You can share it among different threads.
+/// \note The receiver is thread safe. You can share it among different threads, but the next value will received only by on thread.
 template <class T>
 class UnboundReceiver {
 public:
@@ -269,6 +269,7 @@ std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false
 template <class T>
 class Sender;
 
+/// \note The receiver is thread safe. You can share it among different threads, but the next value will received only by on thread.
 template <class T>
 class Receiver {
 public:
