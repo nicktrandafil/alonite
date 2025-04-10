@@ -70,6 +70,10 @@ public:
         std::move(work)();
     }
 
+    void operator()() const& {
+        work();
+    }
+
 private:
     std::function<void()> work;
     std::optional<std::weak_ptr<TaskStack>> canceled_;
@@ -778,7 +782,47 @@ struct PqGreater {
     }
 };
 
-class ThisThreadExecutor final : public Executor {
+struct UnsyncStackOwnerAndExternalWorkImpl : virtual Executor {
+    std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
+            spawned_tasks;
+    std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
+            spawned_task_groups;
+    size_t external_work{0};
+
+    void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
+        spawned_tasks.emplace(std::move(x));
+    }
+
+    void add_guard_group(unsigned id, std::vector<std::shared_ptr<TaskStack>> x) noexcept(
+            false) override {
+        spawned_task_groups.emplace(id, std::move(x));
+    }
+
+    bool remove_guard(TaskStack* x) noexcept override {
+        if (auto const it = spawned_tasks.find(x); it != spawned_tasks.end()) {
+            spawned_tasks.erase(it);
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    bool remove_guard_group(unsigned id) noexcept override {
+        return spawned_task_groups.erase(id) > 0;
+    }
+
+    void increment_external_work() override {
+        ++external_work;
+    }
+
+    void decrement_external_work() override {
+        --external_work;
+    }
+};
+
+class ThisThreadExecutor final
+        : virtual public Executor
+        , virtual public UnsyncStackOwnerAndExternalWorkImpl {
 public:
     ThisThreadExecutor() = default;
 
@@ -860,28 +904,6 @@ public:
         return t.stack->template take_result<T>();
     }
 
-    void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) override {
-        spawned_tasks.emplace(std::move(x));
-    }
-
-    void add_guard_group(unsigned id, std::vector<std::shared_ptr<TaskStack>> x) noexcept(
-            false) override {
-        spawned_task_groups.emplace(id, std::move(x));
-    }
-
-    bool remove_guard(TaskStack* x) noexcept override {
-        if (auto const it = spawned_tasks.find(x); it != spawned_tasks.end()) {
-            spawned_tasks.erase(it);
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-    bool remove_guard_group(unsigned id) noexcept override {
-        return spawned_task_groups.erase(id) > 0;
-    }
-
 private:
     void spawn(Work&& task) override {
         tasks.push_back(std::move(task));
@@ -891,21 +913,8 @@ private:
         delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
     }
 
-    void increment_external_work() override {
-        ++external_work;
-    }
-
-    void decrement_external_work() override {
-        --external_work;
-    }
-
     std::vector<Work> tasks;
     std::priority_queue<DelayedWork, std::vector<DelayedWork>, PqGreater> delayed_tasks;
-    std::unordered_set<std::shared_ptr<TaskStack>, TaskStackPtrHash, TaskStackPtrEqual>
-            spawned_tasks;
-    std::unordered_map<unsigned, std::vector<std::shared_ptr<TaskStack>>>
-            spawned_task_groups;
-    size_t external_work{0};
 };
 
 class [[nodiscard]] Yield {

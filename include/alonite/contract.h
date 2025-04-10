@@ -8,7 +8,9 @@
 namespace alonite {
 
 struct Todo {
-    [[noreturn]] Todo(std::source_location const& l) {
+    template <class... Args>
+    [[noreturn]] Todo(Args&&...,
+                      std::source_location const& l = std::source_location::current()) {
 #ifdef alonite_ABORT_ON_TODO
         static_cast<void>(l);
         std::abort();
@@ -26,11 +28,6 @@ struct Todo {
         std::abort();
     }
 };
-
-#define alonite_todo()                                                                   \
-    alonite::Todo {                                                                      \
-        std::source_location::current()                                                  \
-    }
 
 struct Invariant {
     template <class... Ts> // todo: optional<string_view>

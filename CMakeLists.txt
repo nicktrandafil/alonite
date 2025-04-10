@@ -4,10 +4,13 @@ project(alonite VERSION 0.1 LANGUAGES CXX)
 
 include(cmake/common.cmake)
 
+set(CMAKE_AUTOMOC ON)
+
 add_library(alonite INTERFACE 
     include/alonite/contract.h
     include/alonite/log.h
     include/alonite/mpsc.h
+    include/alonite/qt.h
     include/alonite/runtime.h
     include/alonite/scope_exit.h
 )
@@ -25,9 +28,16 @@ if(alonite_ABORT_ON_TODO)
 endif()
 option(alonite_WARNINGS_ARE_ERRORS "Warnings are errors" ON)
 
+find_package(QT NAMES Qt6 Qt5 COMPONENTS Widgets QUIET)
+message(STATUS "Using Qt${QT_VERSION_MAJOR}")
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED QUIET COMPONENTS Core)
+target_link_libraries(alonite INTERFACE Qt${QT_VERSION_MAJOR}::Core)
+
+
 add_executable(test_alonite
     test/mpsc.cpp
     test/runtime.cpp
+    test/qt.cpp
 )
 find_package(Catch2 REQUIRED QUIET)
 target_link_libraries(test_alonite PRIVATE alonite Catch2::Catch2WithMain)
@@ -37,7 +47,7 @@ add_executable(bench_alonite
     bench/runtime.cpp
 )
 find_package(Boost CONFIG REQUIRED COMPONENTS system)
-target_link_libraries(bench_alonite PRIVATE alonite Boost::boost Boost::system)
+target_link_libraries(bench_alonite PRIVATE alonite Boost::boost Boost::system Qt${QT_VERSION_MAJOR}::Core)
 set_target_build_settings(bench_alonite WARNINGS_ARE_ERRORS ${alonite_WARNINGS_ARE_ERRORS})
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

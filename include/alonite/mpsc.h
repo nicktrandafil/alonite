@@ -48,6 +48,30 @@ struct CommonState {
     }
 };
 
+template <>
+struct CommonState<void> {
+    ConditionVariable consumer_cv;
+    std::mutex mutex;
+    uint64_t queue{0};
+    bool closed = false;
+    unsigned sender_count{1};
+
+    void inc_sender() {
+        std::scoped_lock lock{mutex};
+        sender_count += 1;
+    }
+
+    void dec_sender() {
+        std::unique_lock lock{mutex};
+        sender_count -= 1;
+        if (sender_count == 0) {
+            closed = true;
+            lock.unlock();
+            consumer_cv.notify_one();
+        }
+    }
+};
+
 template <class T>
 class UnboundState : public CommonState<T> {
 public:
@@ -82,6 +106,51 @@ public:
 
             if (this->closed) {
                 co_return std::nullopt;
+            }
+
+            lock.unlock();
+            co_await this->consumer_cv.wait();
+            lock.lock();
+        }
+    }
+
+    void dec_receiver() {
+        std::unique_lock lock{this->mutex};
+        this->closed = true;
+        lock.unlock();
+    }
+};
+
+template <>
+class UnboundState<void> : public CommonState<void> {
+public:
+    UnboundState() = default;
+    UnboundState(UnboundState const&) = delete;
+    UnboundState& operator=(UnboundState const&) = delete;
+
+    /// \throw std::bad_alloc, ClosedError
+    void push() noexcept(false) {
+        {
+            std::scoped_lock lock{this->mutex};
+            if (this->closed) {
+                throw ClosedError{};
+            } else {
+                ++queue;
+            }
+        }
+        this->consumer_cv.notify_one();
+    }
+
+    Task<bool> pop() noexcept {
+        std::unique_lock lock{this->mutex};
+        while (true) {
+            if (this->queue) {
+                --this->queue;
+                co_return true;
+            }
+
+            if (this->closed) {
+                co_return false;
             }
 
             lock.unlock();
@@ -163,7 +232,8 @@ private:
 template <class T>
 class UnboundSender;
 
-/// \note The receiver is thread safe. You can share it among different threads.
+/// \note The receiver is thread safe. You can share it among different threads,
+/// but the next value will received only by on thread.
 template <class T>
 class UnboundReceiver {
 public:
@@ -200,6 +270,46 @@ private:
     }
 
     std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
+};
+
+/// \note The receiver is thread safe. You can share it among different threads,
+/// but the next value will received only by on thread.
+template <>
+class UnboundReceiver<void> {
+public:
+    UnboundReceiver(UnboundReceiver const&) = delete;
+    UnboundReceiver& operator=(UnboundReceiver const&) = delete;
+
+    UnboundReceiver(UnboundReceiver&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
+
+    UnboundReceiver& operator=(UnboundReceiver&& rhs) noexcept {
+        this->~UnboundReceiver();
+        new (this) UnboundReceiver{std::move(rhs)};
+        return *this;
+    }
+
+    ~UnboundReceiver() {
+        if (state) {
+            state.value()->dec_receiver();
+        }
+    }
+
+    Task<bool> recv() noexcept {
+        co_return co_await state.value()->pop();
+    }
+
+private:
+    template <class U>
+    friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
+            false);
+
+    UnboundReceiver(std::shared_ptr<detail::UnboundState<void>> state) noexcept
+            : state{std::move(state)} {
+    }
+
+    std::optional<std::shared_ptr<detail::UnboundState<void>>> state;
 };
 
 template <class T>
@@ -259,16 +369,61 @@ private:
     std::optional<std::shared_ptr<detail::UnboundState<T>>> state;
 };
 
-/// \throw std::bad_alloc
-template <class T>
-std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
-    auto state = std::make_shared<detail::UnboundState<T>>();
-    return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
-}
+template <>
+class UnboundSender<void> {
+public:
+    UnboundSender(UnboundSender const& rhs)
+            : state{rhs.state} {
+        if (state) {
+            state.value()->inc_sender();
+        }
+    }
+
+    UnboundSender& operator=(UnboundSender const& rhs) {
+        UnboundSender tmp{rhs};
+        return *this = std::move(tmp);
+    }
+
+    UnboundSender(UnboundSender&& rhs) noexcept
+            : state{take(rhs.state)} {
+    }
+
+    UnboundSender& operator=(UnboundSender&& rhs) noexcept {
+        this->~UnboundSender();
+        new (this) UnboundSender{std::move(rhs)};
+        return *this;
+    }
+
+    ~UnboundSender() {
+        if (state) {
+            state.value()->dec_sender();
+        }
+    }
+
+    /// \throw std::bad_alloc, ClosedError
+    void send() const noexcept(false) {
+        state.value()->push();
+    }
+
+private:
+    UnboundSender() = default;
+
+    template <class U>
+    friend std::pair<UnboundSender<U>, UnboundReceiver<U>> unbound_channel() noexcept(
+            false);
+
+    UnboundSender(std::shared_ptr<detail::UnboundState<void>> state) noexcept
+            : state{std::move(state)} {
+    }
+
+    std::optional<std::shared_ptr<detail::UnboundState<void>>> state;
+};
 
 template <class T>
 class Sender;
 
+/// \note The receiver is thread safe. You can share it among different threads,
+/// but the next value will received only by on thread.
 template <class T>
 class Receiver {
 public:
@@ -358,6 +513,13 @@ private:
 
     std::optional<std::shared_ptr<detail::State<T>>> state;
 };
+
+/// \throw std::bad_alloc
+template <class T>
+std::pair<UnboundSender<T>, UnboundReceiver<T>> unbound_channel() noexcept(false) {
+    auto state = std::make_shared<detail::UnboundState<T>>();
+    return {UnboundSender<T>{state}, UnboundReceiver<T>{std::move(state)}};
+}
 
 /// \throw std::bad_alloc
 template <class T>
