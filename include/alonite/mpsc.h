@@ -1,5 +1,6 @@
 #pragma once
 
+#include "closed_error.h"
 #include "common.h"
 #include "runtime.h"
 
@@ -8,20 +9,6 @@
 #include <optional>
 
 namespace alonite::mpsc {
-
-struct ClosedError : std::exception {
-    explicit ClosedError(std::optional<std::any> value = {})
-            : value{std::move(value)} {
-    }
-
-    const char* what() const noexcept override {
-        return "closed";
-    }
-
-    /// If suspending send failed, then the value reported back here.
-    std::optional<std::any> value;
-};
-
 namespace detail {
 
 template <class T>

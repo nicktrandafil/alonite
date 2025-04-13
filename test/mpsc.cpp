@@ -163,7 +163,7 @@ TEST_CASE("auto-close on receiver drop", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     [](auto) {
     }(std::move(rx));
-    REQUIRE_THROWS_AS(tx.send(1), mpsc::ClosedError);
+    REQUIRE_THROWS_AS(tx.send(1), ClosedError);
 }
 
 TEST_CASE("auto-close on all senders drop", "[mpsc][unbound]") {
@@ -201,7 +201,8 @@ TEST_CASE("construct and send one value", "[mpsc][bound]") {
     REQUIRE(counter == 1);
 }
 
-TEST_CASE("construct and send many values, send and recv block intermittently", "[mpsc][bound]") {
+TEST_CASE("construct and send many values, send and recv block intermittently",
+          "[mpsc][bound]") {
     auto [tx, rx] = mpsc::channel<int>(1);
     ThisThreadExecutor executor;
     int counter = 0;
@@ -257,12 +258,12 @@ TEST_CASE("send values for 500ms; sender is dropped", "[mpsc][bound]") {
     int n = 0;
     executor.block_on([](auto tx, auto rx, auto& n) -> Task<void> {
         spawn(Timeout{500ms, [](auto tx) -> Task<void> {
-            for (int i = 0; true; ++i) {
-                co_await tx.send(i);
-                co_await Yield{};
-            }
-            co_return;
-        }(std::move(tx))});
+                          for (int i = 0; true; ++i) {
+                              co_await tx.send(i);
+                              co_await Yield{};
+                          }
+                          co_return;
+                      }(std::move(tx))});
 
         while (auto const x = co_await rx.recv()) {
             REQUIRE(x == n++);
@@ -279,38 +280,38 @@ TEST_CASE("send values for 500ms concurrently", "[mpsc][bound]") {
     ThreadPoolExecutor executor;
     int n = 0;
     executor.block_on(
-        [](auto tx, auto rx, auto& n) -> Task<void> {
-            spawn(Timeout{500ms, [](auto tx) -> Task<void> {
-                for (int i = 0; true; ++i) {
-                    co_await tx.send(i);
-                    co_await Yield{};
+            [](auto tx, auto rx, auto& n) -> Task<void> {
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      co_await tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      co_await tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                spawn(Timeout{500ms, [](auto tx) -> Task<void> {
+                                  for (int i = 0; true; ++i) {
+                                      co_await tx.send(i);
+                                      co_await Yield{};
+                                  }
+                                  co_return;
+                              }(std::move(tx))});
+
+                while (auto const x = co_await rx.recv()) {
+                    REQUIRE(x == n++);
                 }
+
                 co_return;
-            }(std::move(tx))});
-
-            spawn(Timeout{500ms, [](auto tx) -> Task<void> {
-                for (int i = 0; true; ++i) {
-                    co_await tx.send(i);
-                    co_await Yield{};
-                }
-                co_return;
-            }(std::move(tx))});
-
-            spawn(Timeout{500ms, [](auto tx) -> Task<void> {
-                for (int i = 0; true; ++i) {
-                    co_await tx.send(i);
-                    co_await Yield{};
-                }
-                co_return;
-            }(std::move(tx))});
-
-            while (auto const x = co_await rx.recv()) {
-                REQUIRE(x == n++);
-            }
-
-            co_return;
-        }(std::move(tx), std::move(rx), n),
-                      3);
+            }(std::move(tx), std::move(rx), n),
+            3);
     REQUIRE(n > 100000);
 }
 
