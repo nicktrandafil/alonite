@@ -158,7 +158,11 @@ public:
 
         switch (result_index) {
         case Result::none:
-            return static_cast<T>(alonite_unreachable(Invariant{}));
+            if constexpr (std::is_void_v<T>) {
+                alonite_unreachable(Invariant{});
+            } else {
+                return alonite_unreachable(Invariant{});
+            }
         case Result::exception:
             std::rethrow_exception(result_exception);
         case Result::value:
@@ -181,7 +185,11 @@ public:
             }
         }
 
-        return static_cast<T>(alonite_unreachable(Invariant{}));
+        if constexpr (std::is_void_v<T>) {
+            alonite_unreachable(Invariant{});
+        } else {
+            return alonite_unreachable(Invariant{});
+        }
     }
 
     /// \invariant Inv1
