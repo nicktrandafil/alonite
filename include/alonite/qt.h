@@ -20,8 +20,8 @@ public:
         QTimer::singleShot(0, std::move(w));
     }
 
-    void spawn(Work&& w, std::chrono::milliseconds after) override {
-        QTimer::singleShot(after, std::move(w));
+    void spawn(Work&& w, std::chrono::steady_clock::time_point at) override {
+        QTimer::singleShot(at - std::chrono::steady_clock::now(), std::move(w));
     }
 };
 

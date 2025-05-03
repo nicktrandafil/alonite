@@ -88,7 +88,7 @@ struct Executor {
     }
 
     virtual void spawn(Work&& task) = 0;
-    virtual void spawn(Work&& task, std::chrono::milliseconds after) = 0;
+    virtual void spawn(Work&& task, std::chrono::steady_clock::time_point until) = 0;
     virtual bool remove_guard(TaskStack* x) noexcept = 0;
     virtual void add_guard(std::shared_ptr<TaskStack>&& x) noexcept(false) = 0;
     virtual void add_guard_group(
@@ -917,8 +917,8 @@ private:
         tasks.push_back(std::move(task));
     }
 
-    void spawn(Work&& task, std::chrono::milliseconds after) override {
-        delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
+    void spawn(Work&& task, std::chrono::steady_clock::time_point until) override {
+        delayed_tasks.emplace(std::move(task), until);
     }
 
     std::vector<Work> tasks;
@@ -1122,9 +1122,9 @@ public:
         cv.notify_one();
     }
 
-    void spawn(Work&& task, std::chrono::milliseconds after) override {
+    void spawn(Work&& task, std::chrono::steady_clock::time_point until) override {
         std::lock_guard lock{mutex};
-        delayed_tasks.emplace(std::move(task), std::chrono::steady_clock::now() + after);
+        delayed_tasks.emplace(std::move(task), until);
         cv.notify_one();
     }
 
@@ -1151,8 +1151,13 @@ private:
 
 class [[nodiscard]] Sleep {
 public:
-    explicit Sleep(std::chrono::milliseconds dur) noexcept
-            : dur{dur} {
+    template <class Dur>
+    explicit Sleep(Dur dur) noexcept
+            : until{std::chrono::steady_clock::now() + dur} {
+    }
+
+    explicit Sleep(std::chrono::steady_clock::time_point until)
+            : until{until} {
     }
 
     bool await_ready() const noexcept {
@@ -1170,14 +1175,14 @@ public:
                          }
                      },
                      std::weak_ptr{caller_stack}},
-                dur);
+                until);
     }
 
     void await_resume() noexcept {
     }
 
 private:
-    std::chrono::milliseconds dur;
+    std::chrono::steady_clock::time_point until;
 };
 
 template <AwaitableC A>
@@ -1185,8 +1190,14 @@ class [[nodiscard]] Timeout {
     using T = decltype(std::declval<A>().await_resume());
 
 public:
-    explicit Timeout(std::chrono::milliseconds duration, A&& task) noexcept
-            : dur{duration}
+    template <class Dur>
+    explicit Timeout(Dur after, A&& task) noexcept
+            : at{std::chrono::steady_clock::now() + after}
+            , task{std::move(task)} {
+    }
+
+    explicit Timeout(std::chrono::steady_clock::time_point at, A&& task) noexcept
+            : at{at}
             , task{std::move(task)} {
     }
 
@@ -1270,7 +1281,7 @@ public:
                                          }
                                      },
                                      std::weak_ptr{task_wrapper.stack}},
-                                this->dur);
+                                this->at);
 
         return task_wrapper.co;
     }
@@ -1302,7 +1313,7 @@ private:
     }
 
 private:
-    std::chrono::milliseconds dur;
+    std::chrono::steady_clock::time_point at;
     std::optional<A> task;
     std::weak_ptr<TaskStack> stack;
 };
