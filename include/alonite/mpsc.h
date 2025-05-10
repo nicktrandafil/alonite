@@ -75,6 +75,11 @@ struct CommonState<void> {
         std::scoped_lock lock{mutex};
         return sender_count;
     }
+
+    bool is_receiver_closed() {
+        std::scoped_lock lock{mutex};
+        return closed;
+    }
 };
 
 template <class T>
@@ -456,8 +461,8 @@ public:
         co_return co_await state.value()->pop();
     }
 
-    bool is_closed() {
-        return state.value().get_sender_count();
+    bool is_closed() const {
+        return state.value().get_sender_count() == 0;
     }
 
 private:
@@ -508,6 +513,10 @@ public:
     /// then you might want to `co_await Yield{}` to give up the thread for a moment.
     Task<void> send(T value) const noexcept(false) {
         co_await state.value()->push(std::move(value));
+    }
+
+    bool is_closed() const {
+        return state.value().is_receiver_closed();
     }
 
 private:
