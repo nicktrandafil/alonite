@@ -46,6 +46,16 @@ struct CommonState {
             consumer_cv.notify_one();
         }
     }
+
+    unsigned get_sender_count() {
+        std::scoped_lock lock{mutex};
+        return sender_count;
+    }
+
+    bool is_receiver_closed() {
+        std::scoped_lock lock{mutex};
+        return closed;
+    }
 };
 
 template <>
@@ -462,7 +472,7 @@ public:
     }
 
     bool is_closed() const {
-        return state.value().get_sender_count() == 0;
+        return state.value()->get_sender_count() == 0;
     }
 
 private:
@@ -516,7 +526,7 @@ public:
     }
 
     bool is_closed() const {
-        return state.value().is_receiver_closed();
+        return state.value()->is_receiver_closed();
     }
 
 private:
