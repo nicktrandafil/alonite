@@ -74,7 +74,7 @@ static alonite::Task<void> my_co_main3() {
     co_return;
 }
 
-static alonite::Task<int> my_coro_work_3s() {
+static alonite::Task<size_t> my_coro_work_3s() {
     using namespace alonite;
 
     auto const work = [](size_t) -> Task<void> {

@@ -193,22 +193,21 @@ public:
     }
 
     /// \invariant Inv1
-    template <class T>
-    void put_result(T&& val) noexcept(noexcept(std::forward<T>(val))) {
-        using U = std::decay_t<T>;
+    template <class T, class U>
+    void put_result(U&& val) noexcept(noexcept(std::forward<U>(val))) {
         alonite_assert(result_index == Result::none, Invariant{});
 
         if constexpr (sizeof(T) <= soo_len) {
-            new (&result_value.storage) U(std::forward<T>(val));
+            new (&result_value.storage) T{std::forward<U>(val)};
         } else {
-            result_value.ptr = new T{std::forward<T>(val)};
+            result_value.ptr = new T{std::forward<U>(val)};
         }
 
         destroy_value = +[](ResultType& result_value) {
             if constexpr (sizeof(T) <= soo_len) {
-                std::launder(reinterpret_cast<U*>(&result_value.storage))->~U();
+                std::launder(reinterpret_cast<T*>(&result_value.storage))->~T();
             } else {
-                delete static_cast<U*>(result_value.ptr);
+                delete static_cast<T*>(result_value.ptr);
             }
         };
 
