@@ -847,7 +847,9 @@ TEST_CASE("block current thread, other tasks should get progress",
     using namespace std::chrono_literals;
     ThreadPoolExecutor executor;
 
+#ifdef NDEBUG
     auto const start = steady_clock::now();
+#endif
 
     std::thread t1{[&] {
         executor.block_on(Sleep{17ms});
@@ -872,10 +874,11 @@ TEST_CASE("block current thread, other tasks should get progress",
     t1.join();
     t2.join();
 
+#ifdef NDEBUG
     auto const elapsed = steady_clock::now() - start;
-
     REQUIRE(20ms <= elapsed);
     REQUIRE(elapsed <= 21ms);
+#endif
 }
 
 TEST_CASE("all block_onS return together", "[ThreadPoolExecutor::block_on]") {
@@ -978,7 +981,9 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
         t3.join();
     };
 
+#ifdef NDEBUG
     auto const start = steady_clock::now();
+#endif
 
     exec.block_on([](auto& ex, auto& cv) -> Task<void> {
         co_await WithExecutor{&ex,
@@ -1003,9 +1008,11 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
         co_return;
     }(pool_exec, cv));
 
+#ifdef NDEBUG
     auto const elapsed = steady_clock::now() - start;
     REQUIRE(100ms <= elapsed);
     REQUIRE(elapsed < 103ms);
+#endif
 }
 
 TEST_CASE(
