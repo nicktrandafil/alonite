@@ -70,6 +70,11 @@ struct CommonState<void> {
             consumer_cv.notify_one();
         }
     }
+
+    unsigned get_sender_count() {
+        std::scoped_lock lock{mutex};
+        return sender_count;
+    }
 };
 
 template <class T>
@@ -449,6 +454,10 @@ public:
     /// \throw ClosedError
     Task<std::optional<T>> recv() noexcept {
         co_return co_await state.value()->pop();
+    }
+
+    bool is_closed() {
+        return state.value().get_sender_count();
     }
 
 private:
