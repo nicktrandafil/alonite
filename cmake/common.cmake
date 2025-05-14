@@ -32,7 +32,7 @@ function(set_target_build_settings target)
     endif()
 
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(build_options ${warning_flags})
+        set(build_options ${warning_flags} -fconcepts-diagnostics-depth=2)
         if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo|MinSizeRel")
             set(build_options ${build_options} ${error_flags} -fconcepts)
         elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")

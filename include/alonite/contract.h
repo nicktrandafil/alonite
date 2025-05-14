@@ -7,33 +7,12 @@
 
 namespace alonite {
 
-struct Todo {
-    template <class... Args>
-    [[noreturn]] Todo(Args&&...,
-                      std::source_location const& l = std::source_location::current()) {
-#ifdef alonite_ABORT_ON_TODO
-        static_cast<void>(l);
-        std::abort();
-#else
-        throw std::runtime_error(std::format("todo at {}:{}:{} ({})",
-                                             l.file_name(),
-                                             l.line(),
-                                             l.column(),
-                                             l.function_name()));
-#endif
-    }
-
-    template <class T>
-    [[noreturn]] operator T&() const noexcept {
-        std::abort();
-    }
-};
-
 struct Invariant {
     template <class... Ts> // todo: optional<string_view>
     [[noreturn]] void failed(std::source_location const& l, Ts... msg) {
 #ifdef alonite_ABORT_ON_INVARIANT_VIOLATION
         static_cast<void>(l);
+        (static_cast<void>(msg), ...);
         std::abort();
 #else
         if constexpr (sizeof...(msg) > 0) {
@@ -44,24 +23,20 @@ struct Invariant {
                                                  l.function_name(),
                                                  msg...));
         } else {
-            throw std::runtime_error(std::format("invariant failed at {}:{}:{} ({})",
-                                                 l.file_name(),
-                                                 l.line(),
-                                                 l.column(),
-                                                 l.function_name()));
+            throw std::runtime_error(std::format(
+                    "invariant failed at {}:{}:{} ({})", l.file_name(), l.line(), l.column(), l.function_name()));
         }
 #endif
     }
 };
 
-#define alonite_assert_2_args(expr, module)                                              \
+#define alonite_assert_2_args(expr, module)                                                                            \
     ((expr) || (module.failed(std::source_location::current()), true), AnyExpr{})
-#define alonite_assert_3_args(expr, module, msg)                                         \
+#define alonite_assert_3_args(expr, module, msg)                                                                       \
     ((expr) || (module.failed(std::source_location::current(), msg), true), AnyExpr{})
 
 #define get_4rd_arg(arg1, arg2, arg3, arg4, ...) arg4
-#define alonite_assert_argument_chooser(...)                                             \
-    get_4rd_arg(__VA_ARGS__, alonite_assert_3_args, alonite_assert_2_args, )
+#define alonite_assert_argument_chooser(...) get_4rd_arg(__VA_ARGS__, alonite_assert_3_args, alonite_assert_2_args, )
 
 /// alonite_assert(expr, module, opitonal<string_view>)
 #define alonite_assert(...) alonite_assert_argument_chooser(__VA_ARGS__)(__VA_ARGS__)
@@ -75,7 +50,6 @@ struct AnyExpr {
     }
 };
 
-#define alonite_unreachable(module)                                                      \
-    (module.failed(std::source_location::current()), AnyExpr{})
+#define alonite_unreachable(module) (module.failed(std::source_location::current()), AnyExpr{})
 
 } // namespace alonite

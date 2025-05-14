@@ -167,7 +167,7 @@ TEST_CASE("auto-close on receiver drop", "[mpsc][unbound]") {
     auto [tx, rx] = mpsc::unbound_channel<int>();
     [](auto) {
     }(std::move(rx));
-    REQUIRE_THROWS_AS(tx.send(1), mpsc::ClosedError);
+    REQUIRE_THROWS_AS(tx.send(1), ClosedError);
 }
 
 TEST_CASE("auto-close on all senders drop", "[mpsc][unbound]") {
@@ -205,8 +205,7 @@ TEST_CASE("construct and send one value", "[mpsc][bound]") {
     REQUIRE(counter == 1);
 }
 
-TEST_CASE("construct and send many values, send and recv block intermittently",
-          "[mpsc][bound]") {
+TEST_CASE("construct and send many values, send and recv block intermittently", "[mpsc][bound]") {
     auto [tx, rx] = mpsc::channel<int>(1);
     ThisThreadExecutor executor;
     int counter = 0;

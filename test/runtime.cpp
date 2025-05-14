@@ -1,3 +1,4 @@
+#include <alonite/mpsc.h>
 #include <alonite/runtime.h>
 
 #include <catch2/catch_all.hpp>
@@ -5,6 +6,7 @@
 #include <string_view>
 
 using namespace alonite;
+using namespace std;
 using namespace std::chrono_literals;
 using namespace std::string_view_literals;
 using namespace std::chrono;
@@ -225,22 +227,22 @@ TEST_CASE("the task was already completed by the abort time", "[spawn]") {
     REQUIRE(exception);
 }
 
-TEST_CASE(
-        "spawn a task and wait on cv in it, then after 5ms notify it from the outer task",
-        "[ConditionVariable]") {
+TEST_CASE("spawn a task and wait on cv in it, then after 5ms notify it from the outer task", "[ConditionVariable]") {
     ThisThreadExecutor executor;
     int counter = 0;
     executor.block_on([&]() -> Task<void> {
+        std::mutex mutex;
+        std::unique_lock lock{mutex};
         ConditionVariable cv;
 
-        spawn([](int* counter, ConditionVariable* cv) -> Task<void> {
+        spawn([](int& counter, auto& cv, auto& lock) -> Task<void> {
             auto const start = steady_clock::now();
 
-            co_await cv->wait();
+            co_await cv.wait(lock);
 
             auto const elapsed = steady_clock::now() - start;
 
-            *counter += 2;
+            counter += 2;
 
             REQUIRE(5ms < elapsed);
 #ifdef NDEBUG
@@ -248,9 +250,11 @@ TEST_CASE(
 #endif
 
             co_return;
-        }(&counter, &cv));
+        }(counter, cv, lock));
 
         co_await Sleep{5ms};
+        lock.lock();
+        lock.unlock();
         cv.notify_one();
     }());
     REQUIRE(counter == 2);
@@ -260,135 +264,98 @@ TEST_CASE(
         "spawn two tasks and wait on cv in it, then after 5ms notify one of them, then "
         "after 5ms the other",
         "[ConditionVariable]") {
-    ThisThreadExecutor executor;
     std::vector<std::string_view> events;
-    executor.block_on([&]() -> Task<void> {
+    ThisThreadExecutor{}.block_on([](auto& events) -> Task<void> {
+        std::mutex mutex;
         ConditionVariable cv;
 
-        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
-            auto const start = steady_clock::now();
+        auto [tx1, rx1] = mpsc::unbound_channel<void>();
+        auto [tx2, rx2] = mpsc::unbound_channel<void>();
 
-            co_await cv->wait();
-
-            auto const elapsed = steady_clock::now() - start;
-
+        spawn([](auto& events, auto& mutex, auto& cv, auto rx) -> Task<void> {
+            co_await rx.recv();
+            std::unique_lock lock{mutex};
+            co_await cv.wait(lock);
             events.push_back("task 1 awakened");
-
-            REQUIRE(5ms < elapsed);
-#ifdef NDEBUG
-            REQUIRE(elapsed < 6ms);
-#endif
-
             co_return;
-        }(events, &cv));
+        }(events, mutex, cv, std::move(rx1)));
 
-        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
-            auto const start = steady_clock::now();
-
-            co_await cv->wait();
-
-            auto const elapsed = steady_clock::now() - start;
-
+        spawn([](auto& events, auto& mutex, auto& cv, auto rx) -> Task<void> {
+            co_await rx.recv();
+            std::unique_lock lock{mutex};
+            co_await cv.wait(lock);
             events.push_back("task 2 awakened");
-
-            REQUIRE(10ms < elapsed);
-#ifdef NDEBUG
-            REQUIRE(elapsed < 11ms);
-#endif
-
             co_return;
-        }(events, &cv));
+        }(events, mutex, cv, std::move(rx2)));
 
-        co_await Sleep{5ms};
-        cv.notify_one();
+        tx1.send();
+        co_await Sleep{1ms}; // order by time; practical but failable
+        tx2.send();
 
-        co_await Sleep{5ms};
         cv.notify_one();
-    }());
+        cv.notify_one();
+    }(events));
     REQUIRE(events == (std::vector{"task 1 awakened"sv, "task 2 awakened"sv}));
 }
 
-TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of them",
-          "[ConditionVariable]") {
-    ThisThreadExecutor executor;
+TEST_CASE("spawn two tasks and wait on cv in it, then after 5ms notify both of them", "[ConditionVariable]") {
     std::vector<std::string_view> events;
-    executor.block_on([&]() -> Task<void> {
+    ThisThreadExecutor{}.block_on([](auto& events) -> Task<void> {
+        std::mutex mutex;
         ConditionVariable cv;
 
-        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
-            auto const start = steady_clock::now();
+        auto [tx1, rx1] = mpsc::unbound_channel<void>();
+        auto [tx2, rx2] = mpsc::unbound_channel<void>();
 
-            co_await cv->wait();
-
-            auto const elapsed = steady_clock::now() - start;
-
+        spawn([](auto& events, auto& mutex, auto& cv, auto rx) -> Task<void> {
+            co_await rx.recv();
+            std::unique_lock lock{mutex};
+            co_await cv.wait(lock);
             events.push_back("task 1 awakened");
-
-            REQUIRE(5ms < elapsed);
-#ifdef NDEBUG
-            REQUIRE(elapsed < 6ms);
-#endif
-
             co_return;
-        }(events, &cv));
+        }(events, mutex, cv, std::move(rx1)));
 
-        spawn([](auto& events, ConditionVariable* cv) -> Task<void> {
-            auto const start = steady_clock::now();
-
-            co_await cv->wait();
-
-            auto const elapsed = steady_clock::now() - start;
-
+        spawn([](auto& events, auto& mutex, auto& cv, auto rx) -> Task<void> {
+            co_await rx.recv();
+            std::unique_lock lock{mutex};
+            co_await cv.wait(lock);
             events.push_back("task 2 awakened");
-
-            REQUIRE(5ms < elapsed);
-#ifdef NDEBUG
-            REQUIRE(elapsed < 6ms);
-#endif
-
             co_return;
-        }(events, &cv));
+        }(events, mutex, cv, std::move(rx2)));
 
-        co_await Sleep{5ms};
+        tx2.send();
+        co_await Sleep{1ms}; // order by time; practical but failable
+        tx1.send();
+
         cv.notify_all();
-    }());
-    REQUIRE(events == (std::vector{"task 1 awakened"sv, "task 2 awakened"sv}));
+    }(events));
+    REQUIRE(events == (std::vector{"task 2 awakened"sv, "task 1 awakened"sv}));
 }
 
 TEST_CASE(
         "a timeout on a different executor on upstream cancels the coroutine and "
         "decrements external work on the correct executor",
         "[ConditionVariable]") {
-    ThisThreadExecutor exec;
-
-    exec.block_on([&exec]() -> Task<void> {
+    ThisThreadExecutor{}.block_on([]() -> Task<void> {
         ThreadPoolExecutor pool_exec;
-        ConditionVariable cv;
 
+        pool_exec.increment_external_work();
         std::thread t1{[&] {
-            pool_exec.block_on([](auto& cv) -> Task<void> {
-                cv.notify_one();
-                co_await cv.wait();
-            }(cv));
-        }};
-
-        co_await cv.wait();
-
-        std::thread t2{[&] {
-            pool_exec.block_on(Yield{});
+            pool_exec.block_on(Yield{}, 1);
         }};
 
         ALONITE_SCOPE_EXIT {
+            pool_exec.decrement_external_work();
             t1.join();
-            t2.join();
         };
 
+        ConditionVariable cv;
+        std::mutex mutex;
+        std::unique_lock lock{mutex};
         try {
-            co_await Timeout{10ms, WithExecutor{&pool_exec, cv.wait()}};
+            co_await Timeout{10ms, WithExecutor{&pool_exec, cv.wait(lock)}};
         } catch (TimedOut const&) {
         }
-
-        cv.notify_all();
     }());
 }
 
@@ -842,8 +809,7 @@ TEST_CASE("check actual 2 threads do the tasks", "[ThreadPoolExecutor::block_on]
     REQUIRE(elapsed <= 13ms);
 }
 
-TEST_CASE("block current thread, other tasks should get progress",
-          "[ThreadPoolExecutor::block_on]") {
+TEST_CASE("block current thread, other tasks should get progress", "[ThreadPoolExecutor::block_on]") {
     using namespace std::chrono_literals;
     ThreadPoolExecutor executor;
 
@@ -908,84 +874,69 @@ TEST_CASE("change executor and yield", "[WithExecutor]") {
 
     ConditionVariable cv;
 
-    std::thread t1{[&] {
-        pool_exec.block_on([](auto& cv) -> Task<void> {
-            cv.notify_one();
-            co_await cv.wait();
-        }(cv));
-    }};
+    auto [tx, rx] = mpsc::unbound_channel<void>();
 
-    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
+    std::thread t1{[&] {
+        pool_exec.block_on([](auto rx) -> Task<void> {
+            co_await rx.recv();
+        }(std::move(rx)));
+    }};
 
     ALONITE_SCOPE_EXIT {
         t1.join();
     };
 
-    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+    exec.block_on([](auto& ex, auto tx) -> Task<void> {
         co_await WithExecutor{&ex, Yield{}};
-        cv.notify_all();
-    }(pool_exec, cv));
+        tx.send();
+    }(pool_exec, std::move(tx)));
 }
 
 TEST_CASE("change executor and sleep", "[WithExecutor]") {
     ThisThreadExecutor exec;
     ThreadPoolExecutor pool_exec;
 
-    ConditionVariable cv;
+    auto [tx, rx] = mpsc::channel<char>(1);
 
     std::thread t1{[&] {
-        pool_exec.block_on([](auto& cv) -> Task<void> {
-            cv.notify_one();
-            co_await cv.wait();
-        }(cv));
+        pool_exec.block_on([](auto rx) -> Task<void> {
+            co_await rx.recv();
+        }(std::move(rx)));
     }};
-
-    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
 
     ALONITE_SCOPE_EXIT {
         t1.join();
     };
 
-    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+    exec.block_on([](auto& ex, auto tx) -> Task<void> {
         co_await WithExecutor{&ex, Sleep{10ms}};
-        cv.notify_all();
-    }(pool_exec, cv));
+        co_await tx.send(0);
+    }(pool_exec, std::move(tx)));
 }
 
-TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
+TEST_CASE("three thread sleeps are done in parallel", "[WithExecutor]") {
     ThisThreadExecutor exec;
     ThreadPoolExecutor pool_exec;
 
-    ConditionVariable cv;
+    auto [tx, rx] = mpsc::channel<char>(1);
 
     std::thread t1{[&] {
-        pool_exec.block_on([](auto& cv) -> Task<void> {
-            cv.notify_one();
-            co_await cv.wait();
-        }(cv));
-    }};
-
-    ThisThreadExecutor{}.block_on(cv.wait()); // ticket-1: use semaphore
-
-    std::thread t2{[&] {
-        pool_exec.block_on(Yield{});
-    }};
-
-    std::thread t3{[&] {
-        pool_exec.block_on(Yield{});
+        pool_exec.block_on(
+                [](auto rx) -> Task<void> {
+                    co_await rx.recv();
+                }(std::move(rx)),
+                2);
     }};
 
     ALONITE_SCOPE_EXIT {
         t1.join();
-        t2.join();
-        t3.join();
     };
 
 #ifdef NDEBUG
     auto const start = steady_clock::now();
 #endif
 
-    exec.block_on([](auto& ex, auto& cv) -> Task<void> {
+    exec.block_on([](auto& ex, auto tx) -> Task<void> {
         co_await WithExecutor{&ex,
                               WhenAll{[]() -> Task<void> {
                                           // We don't want all three sleeps to end up
@@ -1004,9 +955,8 @@ TEST_CASE("two thread sleeps are done in parallel", "[WithExecutor]") {
                                           std::this_thread::sleep_for(97ms);
                                           co_return;
                                       }()}};
-        cv.notify_all();
-        co_return;
-    }(pool_exec, cv));
+        co_await tx.send(0);
+    }(pool_exec, std::move(tx)));
 
 #ifdef NDEBUG
     auto const elapsed = steady_clock::now() - start;
@@ -1020,40 +970,33 @@ TEST_CASE(
         "decrements external work on the correct executor",
         "[WithExecutor]") {
     ThisThreadExecutor exec;
-
-    exec.block_on([&exec]() -> Task<void> {
+    exec.block_on([](auto& exec) -> Task<void> {
         ThreadPoolExecutor pool_exec;
-        ConditionVariable cv;
+
+        auto [tx, rx] = mpsc::channel<char>(1);
 
         std::thread t1{[&] {
-            pool_exec.block_on([](auto& cv) -> Task<void> {
-                cv.notify_one();
-                co_await cv.wait();
-            }(cv));
-        }};
-
-        co_await cv.wait(); // ticket-1: use semaphore
-
-        std::thread t2{[&] {
-            pool_exec.block_on(Yield{});
+            pool_exec.block_on(
+                    [](auto rx) -> Task<void> {
+                        co_await rx.recv();
+                    }(std::move(rx)),
+                    1);
         }};
 
         ALONITE_SCOPE_EXIT {
             t1.join();
-            t2.join();
         };
 
         try {
-            co_await Timeout{
-                    10ms,
-                    WithExecutor{&pool_exec,
-                                 /*this adds external work on `pool_exec`; it needs
-                                    subtract the external work from `pool_exec`, even
-                                    though it is `exec` who destroys the stack*/
-                                 WithExecutor{&exec, Sleep{20ms}}}};
+            co_await Timeout{10ms,
+                             WithExecutor{&pool_exec,
+                                          /*this adds external work on `pool_exec`; it needs
+                                             subtract the external work from `pool_exec`, even
+                                             though it is `exec` who destroys the stack*/
+                                          WithExecutor{&exec, Sleep{20ms}}}};
         } catch (TimedOut const&) {
         }
 
-        cv.notify_all();
-    }());
+        co_await tx.send(0);
+    }(exec));
 }
