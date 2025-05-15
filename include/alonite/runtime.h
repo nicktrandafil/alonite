@@ -438,7 +438,7 @@ public:
     /// \note thread-safe
     bool notify_one() noexcept {
         if (auto c = [this] {
-                std::optional<std::shared_ptr<TaskStack>> ret;
+                std::shared_ptr<TaskStack> ret;
                 std::lock_guard lock{mutex};
                 if (!continuations.empty()) {
                     ret = continuations.front().lock();
@@ -446,8 +446,8 @@ public:
                 }
                 return ret;
             }()) {
-            if (!schedule_if_not(std::move(*c), current_executor)) {
-                (*c)->erased_top().co.resume();
+            if (!schedule_if_not(std::move(c), current_executor)) {
+                c->erased_top().co.resume();
             }
             return true;
         } else {
